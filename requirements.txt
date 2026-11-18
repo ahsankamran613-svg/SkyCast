@@ -1,0 +1,8 @@
+# Lightweight runtime dependencies for FastAPI serverless serving (Vercel <50MB target).
+# Heavy ML, Deep Learning, XAI, and Agentic dependencies live in requirements-ml.txt.
+fastapi>=0.128.0,<1.0
+pydantic>=2.10.0,<3.0
+pydantic-settings>=2.15.0,<3.0
+python-dotenv>=1.0.0,<2.0
+supabase>=2.31.0,<3.0
+httpx>=0.28.1,<1.0
