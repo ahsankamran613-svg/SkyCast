@@ -419,8 +419,11 @@ class Settings(BaseSettings):
     # --- External Data Sources (No Key Required) ---
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
     open_meteo_archive_url: str = "https://archive-api.open-meteo.com/v1/archive"
+    open_meteo_historical_forecast_url: str = (
+        "https://historical-forecast-api.open-meteo.com/v1/forecast"
+    )
     open_meteo_air_quality_url: str = "https://air-quality-api.open-meteo.com/v1/air-quality"
-    met_no_forecast_url: str = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+    met_no_forecast_url: str = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
     met_no_user_agent: str = "SkyCast-10Pearls-Portfolio/1.0"
     http_timeout_seconds: float = Field(default=20.0, gt=0.0)
 
