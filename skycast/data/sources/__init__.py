@@ -5,7 +5,9 @@ from skycast.data.sources.met_no import (
     compute_steadman_apparent_temperature,
     fetch_met_no_forecast,
     metno_symbol_to_wmo_code,
+    normalize_symbol_code,
     parse_met_no_timeseries,
+    sea_level_to_surface_pressure,
     wmo_code_to_symbol,
 )
 from skycast.data.sources.open_meteo import (
@@ -33,7 +35,9 @@ __all__ = [
     "fetch_open_meteo_historical",
     "fetch_open_meteo_weather",
     "metno_symbol_to_wmo_code",
+    "normalize_symbol_code",
     "parse_met_no_timeseries",
     "parse_open_meteo_hourly",
+    "sea_level_to_surface_pressure",
     "wmo_code_to_symbol",
 ]

@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from skycast.config.settings import POLLUTANT_COLUMNS, Settings, TARGET_METRICS, get_settings
@@ -315,11 +318,19 @@ def _now_utc_iso() -> str:
 def _parse_json_or_default(raw: Any, default: Any) -> Any:
     if raw is None:
         return default
-    if isinstance(raw, type(default)):
+    if isinstance(default, list):
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, np.ndarray):
+            return raw.tolist()
+        if isinstance(raw, (tuple, set)):
+            return list(raw)
+    elif isinstance(raw, type(default)):
         return raw
     if isinstance(raw, str):
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, type(default)) else default
         except json.JSONDecodeError:
             return default
     return default
@@ -377,7 +388,11 @@ def dataframe_to_hopsworks_frame(
     cols: dict[str, Any] = {
         "timestamp_epoch_ms": epoch_ms.astype("int64"),
         "timestamp_utc": ts,
-        "condition_symbol": df["condition_symbol"].fillna("partlycloudy").astype(str),
+        "condition_symbol": (
+            df["condition_symbol"].fillna("unknown").astype(str)
+            if "condition_symbol" in df.columns
+            else pd.Series("unknown", index=df.index, dtype=str)
+        ),
         "sources_available": [
             json.dumps([str(s) for s in _parse_json_or_default(v, [])])
             for v in df.get("sources_available", [[] for _ in range(len(df))])
@@ -418,11 +433,17 @@ def dataframe_to_hopsworks_frame(
         if col in {"is_weekend", "is_lahore_smog_season", "is_monsoon_season"}:
             cols[col] = df[col].fillna(False).astype(bool) if col in df.columns else False
         elif col == "weather_code":
-            cols[col] = (
-                pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
-                if col in df.columns
-                else 0
-            )
+            if col in df.columns:
+                wmo_num = pd.to_numeric(df[col], errors="coerce")
+                missing_wmo = int(wmo_num.isna().sum())
+                if missing_wmo > 0:
+                    logger.warning(
+                        "Hopsworks serialization found %d missing weather_code row(s); encoding as -1.",
+                        missing_wmo,
+                    )
+                cols[col] = wmo_num.fillna(-1).astype("int64")
+            else:
+                cols[col] = pd.Series(-1, index=df.index, dtype="int64")
         else:
             cols[col] = (
                 pd.to_numeric(df[col], errors="coerce").astype("float64")
@@ -440,6 +461,7 @@ class SkyCastStorage:
         self.settings = settings or get_settings()
         self._supabase_client: Any = None
         self._hopsworks_project: Any = None
+        self._initialized_sqlite_paths: set[Path] = set()
 
     @property
     def local_db_path(self) -> Path:
@@ -453,20 +475,35 @@ class SkyCastStorage:
             return "cloud_dual"
         if self.settings.has_supabase_credentials:
             return "cloud_supabase"
-        return "cloud_hopsworks"
+        if self.settings.has_hopsworks_credentials:
+            return "cloud_hopsworks"
+        return "unconfigured"
 
-    def _connect_sqlite(self) -> sqlite3.Connection:
+    @contextmanager
+    def _sqlite_connection(self) -> Iterator[sqlite3.Connection]:
         self.local_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.local_db_path)
+        resolved = self.local_db_path.resolve()
+        conn = sqlite3.connect(self.local_db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        for stmt in _SQLITE_SCHEMA_STATEMENTS:
-            conn.execute(stmt)
-        return conn
+        try:
+            if resolved not in self._initialized_sqlite_paths:
+                conn.execute("PRAGMA journal_mode=WAL")
+                for stmt in _SQLITE_SCHEMA_STATEMENTS:
+                    conn.execute(stmt)
+                conn.commit()
+                self._initialized_sqlite_paths.add(resolved)
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def init_local_db(self) -> Path:
         """Ensure the local SQLite database and all 12 schema tables exist."""
-        with self._connect_sqlite() as conn:
-            conn.commit()
+        with self._sqlite_connection():
+            pass
         return self.local_db_path
 
     def _get_supabase(self) -> Any:
@@ -516,6 +553,17 @@ class SkyCastStorage:
 
         use_offline = self.settings.is_offline_mode
         should_write_local = use_offline if write_local is None else write_local
+        will_write_supabase = (
+            not use_offline and write_supabase and self.settings.has_supabase_credentials
+        )
+        will_write_hopsworks = (
+            not use_offline and write_hopsworks and self.settings.has_hopsworks_credentials
+        )
+        if not (should_write_local or will_write_supabase or will_write_hopsworks):
+            raise StorageError(
+                f"No storage backend is active for mode '{self.storage_mode}': "
+                "configure Supabase/Hopsworks credentials or enable offline mode."
+            )
 
         summary: dict[str, Any] = {
             "storage_mode": self.storage_mode,
@@ -528,25 +576,24 @@ class SkyCastStorage:
             records = dataframe_to_supabase_weather_records(ordered, settings=self.settings)
             summary["sqlite_rows"] = self._upsert_sqlite_weather_features(records)
 
-        if not use_offline:
-            if write_supabase and self.settings.has_supabase_credentials:
-                days_window = supabase_days
-                if days_window is None:
-                    days_window = (
-                        self.settings.supabase_history_days
-                        if self.settings.has_hopsworks_credentials
-                        else max(self.settings.supabase_history_days, 180)
-                    )
-                cutoff = ordered["timestamp_utc"].max() - pd.Timedelta(days=days_window)
-                supa_df = ordered.loc[ordered["timestamp_utc"] >= cutoff]
-                supa_records = dataframe_to_supabase_weather_records(
-                    supa_df, settings=self.settings
+        if will_write_supabase:
+            days_window = supabase_days
+            if days_window is None:
+                days_window = (
+                    self.settings.supabase_history_days
+                    if self.settings.has_hopsworks_credentials
+                    else max(self.settings.supabase_history_days, 180)
                 )
-                summary["supabase_rows"] = self._upsert_supabase_weather_features(supa_records)
+            cutoff = ordered["timestamp_utc"].max() - pd.Timedelta(days=days_window)
+            supa_df = ordered.loc[ordered["timestamp_utc"] >= cutoff]
+            supa_records = dataframe_to_supabase_weather_records(
+                supa_df, settings=self.settings
+            )
+            summary["supabase_rows"] = self._upsert_supabase_weather_features(supa_records)
 
-            if write_hopsworks and self.settings.has_hopsworks_credentials:
-                hw_df = dataframe_to_hopsworks_frame(ordered, settings=self.settings)
-                summary["hopsworks_rows"] = self._upsert_hopsworks_feature_group(hw_df)
+        if will_write_hopsworks:
+            hw_df = dataframe_to_hopsworks_frame(ordered, settings=self.settings)
+            summary["hopsworks_rows"] = self._upsert_hopsworks_feature_group(hw_df)
 
         return summary
 
@@ -580,9 +627,8 @@ class SkyCastStorage:
             row_vals.extend([now_iso, now_iso])
             rows_to_insert.append(tuple(row_vals))
 
-        with self._connect_sqlite() as conn:
+        with self._sqlite_connection() as conn:
             conn.executemany(sql, rows_to_insert)
-            conn.commit()
         return len(rows_to_insert)
 
     def _upsert_supabase_weather_features(
@@ -612,7 +658,7 @@ class SkyCastStorage:
             fg = fs.get_or_create_feature_group(
                 name=self.settings.hopsworks_feature_group_name,
                 version=self.settings.hopsworks_feature_group_version,
-                description="Hourly fused Lahore weather, air quality pollutants, and 35+ engineered features.",
+                description="Hourly fused Lahore weather, air quality pollutants, and engineered temporal features.",
                 primary_key=["timestamp_epoch_ms"],
                 event_time="timestamp_utc",
                 online_enabled=True,
@@ -632,6 +678,11 @@ class SkyCastStorage:
         prefer_hopsworks: bool = False,
     ) -> pd.DataFrame:
         """Read stored hourly weather features from Local SQLite, Supabase, or Hopsworks."""
+        if self.storage_mode == "unconfigured":
+            raise StorageError(
+                "No storage backend is active for mode 'unconfigured': "
+                "configure Supabase/Hopsworks credentials or enable offline mode."
+            )
         rows: list[dict[str, Any]]
         if (
             prefer_hopsworks
@@ -700,7 +751,7 @@ class SkyCastStorage:
             f"ORDER BY timestamp_utc DESC {limit_sql}"
         )
 
-        with self._connect_sqlite() as conn:
+        with self._sqlite_connection() as conn:
             cursor = conn.execute(query, params)
             raw_rows = [dict(r) for r in cursor.fetchall()]
 
@@ -723,17 +774,32 @@ class SkyCastStorage:
     ) -> list[dict[str, Any]]:
         try:
             client = self._get_supabase()
-            query = client.table("weather_features_hourly").select("*").order(
-                "timestamp_utc", desc=True
-            )
-            if start_utc is not None:
-                query = query.gte("timestamp_utc", _utc_iso(start_utc))
-            if end_utc is not None:
-                query = query.lte("timestamp_utc", _utc_iso(end_utc))
-            if limit_hours is not None:
-                query = query.limit(int(limit_hours))
-            response = query.execute()
-            rows = list(response.data or [])
+            page_size = 1000
+            rows: list[dict[str, Any]] = []
+            offset = 0
+
+            def _build_query() -> Any:
+                q = client.table("weather_features_hourly").select("*").order(
+                    "timestamp_utc", desc=True
+                )
+                if start_utc is not None:
+                    q = q.gte("timestamp_utc", _utc_iso(start_utc))
+                if end_utc is not None:
+                    q = q.lte("timestamp_utc", _utc_iso(end_utc))
+                return q
+
+            while True:
+                remaining = (int(limit_hours) - len(rows)) if limit_hours is not None else page_size
+                if remaining <= 0:
+                    break
+                step = min(page_size, remaining)
+                response = _build_query().range(offset, offset + step - 1).execute()
+                batch = list(response.data or [])
+                rows.extend(batch)
+                if len(batch) < step:
+                    break
+                offset += step
+
             rows.reverse()
             return rows
         except Exception as exc:
@@ -752,7 +818,18 @@ class SkyCastStorage:
                 name=self.settings.hopsworks_feature_group_name,
                 version=self.settings.hopsworks_feature_group_version,
             )
-            df = fg.read()
+            read_kwargs: dict[str, Any] = {}
+            if start_utc is not None:
+                read_kwargs["start_time"] = pd.to_datetime(start_utc, utc=True).to_pydatetime()
+            if end_utc is not None:
+                read_kwargs["end_time"] = pd.to_datetime(end_utc, utc=True).to_pydatetime()
+            if read_kwargs:
+                try:
+                    df = fg.read(**read_kwargs)
+                except TypeError:
+                    df = fg.read()
+            else:
+                df = fg.read()
         except Exception as exc:
             raise StorageError(f"Hopsworks Feature Group read failed: {exc}") from exc
 
@@ -808,8 +885,14 @@ class SkyCastStorage:
         completed_iso = _utc_iso(completed_at_utc) if completed_at_utc else None
         meta_clean = sanitize_json_scalar(metadata or {})
 
+        if self.storage_mode == "unconfigured":
+            raise StorageError(
+                "No storage backend is active for mode 'unconfigured': "
+                "configure Supabase/Hopsworks credentials or enable offline mode."
+            )
+
         if self.settings.is_offline_mode or not self.settings.has_supabase_credentials:
-            with self._connect_sqlite() as conn:
+            with self._sqlite_connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO pipeline_runs (
@@ -836,7 +919,6 @@ class SkyCastStorage:
                         now_iso,
                     ),
                 )
-                conn.commit()
             return
 
         try:
@@ -862,10 +944,15 @@ class SkyCastStorage:
         pipeline_type: str | None = None,
     ) -> dict[str, Any] | None:
         """Fetch the most recent pipeline run record (optionally filtered by type)."""
+        if self.storage_mode == "unconfigured":
+            raise StorageError(
+                "No storage backend is active for mode 'unconfigured': "
+                "configure Supabase/Hopsworks credentials or enable offline mode."
+            )
         if self.settings.is_offline_mode or not self.settings.has_supabase_credentials:
             if not self.local_db_path.exists():
                 return None
-            with self._connect_sqlite() as conn:
+            with self._sqlite_connection() as conn:
                 if pipeline_type:
                     row = conn.execute(
                         "SELECT * FROM pipeline_runs WHERE pipeline_type = ? "
@@ -897,10 +984,15 @@ class SkyCastStorage:
 
     def get_latest_imputation_audit(self) -> dict[str, Any] | None:
         """Return the latest imputation audit dictionary logged by backfill or hourly_ingest."""
+        if self.storage_mode == "unconfigured":
+            raise StorageError(
+                "No storage backend is active for mode 'unconfigured': "
+                "configure Supabase/Hopsworks credentials or enable offline mode."
+            )
         if self.settings.is_offline_mode or not self.settings.has_supabase_credentials:
             if not self.local_db_path.exists():
                 return None
-            with self._connect_sqlite() as conn:
+            with self._sqlite_connection() as conn:
                 rows = conn.execute(
                     "SELECT metadata_json FROM pipeline_runs "
                     "WHERE status = 'completed' ORDER BY started_at_utc DESC, id DESC LIMIT 10"

@@ -17,8 +17,23 @@ from skycast.config.settings import (
 )
 from skycast.data.sources.met_no import (
     compute_steadman_apparent_temperature,
+    metno_symbol_to_wmo_code,
+    normalize_symbol_code,
+    sea_level_to_surface_pressure,
     wmo_code_to_symbol,
 )
+
+DOMAIN_CLAMP_BOUNDS: dict[str, tuple[float | None, float | None]] = {
+    **{
+        name: (spec.min_value, spec.max_value)
+        for name, spec in METRIC_SPECS.items()
+        if not spec.is_circular
+    },
+    "apparent_temperature": (-30.0, 65.0),
+    "surface_pressure": (800.0, 1100.0),
+    "cloud_cover": (0.0, 100.0),
+    **{col: (0.0, None) for col in POLLUTANT_COLUMNS},
+}
 
 RAW_TRANSPARENCY_COLUMNS: tuple[str, ...] = (
     "temp_openmeteo",
@@ -89,12 +104,20 @@ def _extract_numeric_series(
     frame: pd.DataFrame | None,
     index: pd.DatetimeIndex,
     column: str,
+    *,
+    shift_hours: int = 0,
 ) -> pd.Series:
     if frame is None or column not in frame.columns:
         return pd.Series(np.nan, index=index, dtype="float64")
-    indexed = frame.set_index("timestamp_utc")[column]
-    series = pd.to_numeric(indexed.reindex(index), errors="coerce").astype("float64")
-    return series
+    if shift_hours == 0:
+        indexed = frame.set_index("timestamp_utc")[column]
+        return pd.to_numeric(indexed.reindex(index), errors="coerce").astype("float64")
+
+    ts = frame["timestamp_utc"] + pd.Timedelta(hours=shift_hours)
+    values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype="float64")
+    indexed = pd.Series(values, index=ts)
+    indexed = indexed[~indexed.index.duplicated(keep="last")]
+    return indexed.reindex(index).astype("float64")
 
 
 def _extract_object_series(
@@ -114,6 +137,16 @@ def _weighted_linear_fuse(
     w_om: float,
     w_met: float,
 ) -> pd.Series:
+    return weighted_linear_fuse(om, met, w_om, w_met)
+
+
+def weighted_linear_fuse(
+    om: pd.Series,
+    met: pd.Series,
+    w_om: float,
+    w_met: float,
+) -> pd.Series:
+    """Fuse two aligned float series via weighted average with single-source fallback."""
     both = om.notna() & met.notna()
     fused = pd.Series(np.nan, index=om.index, dtype="float64")
     fused.loc[both] = w_om * om.loc[both] + w_met * met.loc[both]
@@ -125,6 +158,15 @@ def _weighted_linear_fuse(
 
 
 def _weighted_circular_fuse(
+    om_deg: pd.Series,
+    met_deg: pd.Series,
+    w_om: float,
+    w_met: float,
+) -> pd.Series:
+    return weighted_circular_fuse(om_deg, met_deg, w_om, w_met)
+
+
+def weighted_circular_fuse(
     om_deg: pd.Series,
     met_deg: pd.Series,
     w_om: float,
@@ -185,6 +227,7 @@ def fuse_weather_sources(
     end_ts = _to_utc_timestamp(end_utc)
 
     om = _prepare_source_frame(open_meteo_df, start_ts=start_ts, end_ts=end_ts)
+    met_full = _prepare_source_frame(met_no_df, start_ts=None, end_ts=end_ts)
     met = _prepare_source_frame(met_no_df, start_ts=start_ts, end_ts=end_ts)
 
     if om is None and met is None:
@@ -232,24 +275,54 @@ def fuse_weather_sources(
     app_met = _extract_numeric_series(met, hourly_index, "apparent_air_temperature")
     wmo_met = _extract_numeric_series(met, hourly_index, "weather_code")
     rh_met = _extract_numeric_series(met, hourly_index, "relative_humidity")
-    precip_met = _extract_numeric_series(met, hourly_index, "precipitation_amount")
+    # Met.no `next_1_hours.precipitation_amount` at t covers [t, t+1h]; shift +1h to match
+    # Open-Meteo's ending-hour [t-1h, t] convention.
+    precip_met = _extract_numeric_series(
+        met_full, hourly_index, "precipitation_amount", shift_hours=1
+    )
     uv_met = _extract_numeric_series(met, hourly_index, "ultraviolet_index_clear_sky")
     wind_spd_met = _extract_numeric_series(met, hourly_index, "wind_speed")
     wind_dir_met = _extract_numeric_series(met, hourly_index, "wind_from_direction")
-    pressure_met = _extract_numeric_series(met, hourly_index, "air_pressure_at_sea_level")
+    pressure_met_msl = _extract_numeric_series(met, hourly_index, "air_pressure_at_sea_level")
     cloud_met = _extract_numeric_series(met, hourly_index, "cloud_area_fraction")
     symbol_met = _extract_object_series(met, hourly_index, "symbol_code")
 
-    # Canonical weighted fusion
+    # Convert Met.no sea-level pressure to Lahore station surface pressure before fusing.
+    ref_temp_for_pressure = temp_met.combine_first(temp_om)
+    pressure_met_surface = pd.Series(np.nan, index=hourly_index, dtype="float64")
+    has_p_met = pressure_met_msl.notna()
+    if has_p_met.any():
+        pressure_met_surface.loc[has_p_met] = [
+            sea_level_to_surface_pressure(
+                float(p_val),
+                cfg.lahore_elevation_m,
+                None if pd.isna(t_val) else float(t_val),
+            )
+            for p_val, t_val in zip(
+                pressure_met_msl.loc[has_p_met].tolist(),
+                ref_temp_for_pressure.loc[has_p_met].tolist(),
+            )
+        ]
+
+    # Canonical weighted fusion across physically commensurate variables
     temp_fused = _weighted_linear_fuse(temp_om, temp_met, w_om, w_met)
     rh_fused = _weighted_linear_fuse(rh_om, rh_met, w_om, w_met)
     precip_fused = _weighted_linear_fuse(precip_om, precip_met, w_om, w_met)
-    uv_fused = _weighted_linear_fuse(uv_om, uv_met, w_om, w_met)
     wind_spd_fused = _weighted_linear_fuse(wind_spd_om, wind_spd_met, w_om, w_met)
     wind_dir_fused = _weighted_circular_fuse(wind_dir_om, wind_dir_met, w_om, w_met)
-    pressure_fused = _weighted_linear_fuse(pressure_om, pressure_met, w_om, w_met)
+    pressure_fused = _weighted_linear_fuse(pressure_om, pressure_met_surface, w_om, w_met)
     cloud_fused = _weighted_linear_fuse(cloud_om, cloud_met, w_om, w_met)
     apparent_fused = _weighted_linear_fuse(app_om, app_met, w_om, w_met)
+
+    # Open-Meteo uv_index is cloud-attenuated; Met.no supplies clear-sky UV only. Use Open-Meteo
+    # directly when available and cloud-attenuate Met.no clear-sky UV only during fallback.
+    uv_met_fallback = pd.Series(np.nan, index=hourly_index, dtype="float64")
+    has_uv_met = uv_met.notna()
+    if has_uv_met.any():
+        cloud_for_uv = cloud_fused.fillna(0.0).clip(lower=0.0, upper=100.0)
+        cmf = 1.0 - 0.75 * ((cloud_for_uv / 100.0) ** 3)
+        uv_met_fallback.loc[has_uv_met] = uv_met.loc[has_uv_met] * cmf.loc[has_uv_met]
+    uv_fused = uv_om.combine_first(uv_met_fallback)
 
     # Steadman apparent temperature fallback where both apparent fields are absent
     missing_app = apparent_fused.isna() & temp_fused.notna() & rh_fused.notna()
@@ -265,17 +338,33 @@ def fuse_weather_sources(
             if steadman is not None:
                 apparent_fused.loc[ts] = steadman
 
-    weather_code_fused = wmo_om.combine_first(wmo_met)
-    condition_symbol = symbol_met.copy()
-    missing_symbol = condition_symbol.isna() | (condition_symbol == "")
-    if missing_symbol.any():
-        condition_symbol.loc[missing_symbol] = weather_code_fused.loc[missing_symbol].map(
-            lambda code: wmo_code_to_symbol(code) if pd.notna(code) else None
+    wmo_from_symbol = symbol_met.map(
+        lambda s: float(c) if (c := metno_symbol_to_wmo_code(s)) is not None else np.nan
+    )
+    wmo_met_resolved = wmo_met.combine_first(pd.to_numeric(wmo_from_symbol, errors="coerce"))
+    weather_code_fused = wmo_om.combine_first(wmo_met_resolved)
+
+    # Keep condition_symbol consistent with weather_code_fused source priority (Open-Meteo first).
+    condition_symbol = pd.Series(None, index=hourly_index, dtype="object")
+    has_om_wmo = wmo_om.notna()
+    if has_om_wmo.any():
+        condition_symbol.loc[has_om_wmo] = wmo_om.loc[has_om_wmo].map(wmo_code_to_symbol)
+    fallback_mask = (~has_om_wmo) & weather_code_fused.notna()
+    if fallback_mask.any():
+        norm_met_sym = symbol_met.loc[fallback_mask].map(normalize_symbol_code)
+        derived_sym = weather_code_fused.loc[fallback_mask].map(wmo_code_to_symbol)
+        condition_symbol.loc[fallback_mask] = norm_met_sym.where(
+            norm_met_sym.notna() & (norm_met_sym != ""),
+            derived_sym,
         )
 
     # Open-Meteo only pollutants & AQI & rain probability
     us_aqi = _extract_numeric_series(om, hourly_index, "us_aqi")
     precip_prob = precip_prob_om
+
+    app_low, app_high = DOMAIN_CLAMP_BOUNDS["apparent_temperature"]
+    pres_low, pres_high = DOMAIN_CLAMP_BOUNDS["surface_pressure"]
+    cloud_low, cloud_high = DOMAIN_CLAMP_BOUNDS["cloud_cover"]
 
     data: dict[str, Any] = {
         "timestamp_utc": hourly_index,
@@ -287,11 +376,11 @@ def fuse_weather_sources(
         "uv_index": uv_fused,
         "wind_speed_10m": wind_spd_fused,
         "wind_direction_10m": wind_dir_fused,
-        "apparent_temperature": apparent_fused,
+        "apparent_temperature": _clamp_series(apparent_fused, app_low, app_high),
         "weather_code": weather_code_fused,
         "condition_symbol": condition_symbol,
-        "surface_pressure": _clamp_series(pressure_fused, 800.0, 1100.0),
-        "cloud_cover": _clamp_series(cloud_fused, 0.0, 100.0),
+        "surface_pressure": _clamp_series(pressure_fused, pres_low, pres_high),
+        "cloud_cover": _clamp_series(cloud_fused, cloud_low, cloud_high),
     }
 
     for pollutant in POLLUTANT_COLUMNS:
@@ -320,7 +409,8 @@ def fuse_weather_sources(
     data["wind_dir_metno"] = _clamp_series(wind_dir_met, 0.0, 360.0, is_circular=True)
     data["uv_openmeteo"] = uv_om
     data["uv_metno"] = uv_met
-    data["source_disagreement_temp"] = (temp_om - temp_met).abs().fillna(0.0)
+    # Leave missing disagreement as NaN when either source lacks temperature.
+    data["source_disagreement_temp"] = (temp_om - temp_met).abs()
 
     om_present = (
         temp_om.notna()

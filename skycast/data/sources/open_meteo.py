@@ -11,6 +11,7 @@ import httpx
 import pandas as pd
 
 from skycast.config.settings import Settings, get_settings
+from skycast.data.sources._http import request_json_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,12 @@ class OpenMeteoError(RuntimeError):
     """Raised when an Open-Meteo API request or payload parsing fails."""
 
 
+def _validate_open_meteo_payload(payload: dict[str, Any], url: str) -> None:
+    if payload.get("error"):
+        reason = payload.get("reason", "unknown API error")
+        raise OpenMeteoError(f"Open-Meteo returned error from {url}: {reason}")
+
+
 def _request_json_with_retry(
     client: httpx.Client,
     url: str,
@@ -83,38 +90,17 @@ def _request_json_with_retry(
     max_retries: int = 2,
     backoff_seconds: float = 0.4,
 ) -> dict[str, Any]:
-    """Execute a GET request with bounded retries on transient errors."""
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.get(url, params=params)
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < max_retries:
-                if backoff_seconds > 0:
-                    time.sleep(backoff_seconds * (attempt + 1))
-                continue
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise OpenMeteoError(f"Expected JSON object from {url}, got {type(payload).__name__}")
-            if payload.get("error"):
-                reason = payload.get("reason", "unknown API error")
-                raise OpenMeteoError(f"Open-Meteo returned error from {url}: {reason}")
-            return payload
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                if backoff_seconds > 0:
-                    time.sleep(backoff_seconds * (attempt + 1))
-                continue
-            raise OpenMeteoError(f"Open-Meteo network error for {url}: {exc}") from exc
-        except httpx.HTTPStatusError as exc:
-            raise OpenMeteoError(
-                f"Open-Meteo HTTP {exc.response.status_code} for {url}: {exc.response.text[:300]}"
-            ) from exc
-        except ValueError as exc:
-            raise OpenMeteoError(f"Invalid JSON from Open-Meteo {url}: {exc}") from exc
-
-    raise OpenMeteoError(f"Open-Meteo request failed for {url}: {last_exc}")
+    """Execute an Open-Meteo GET request with bounded retries on transient errors."""
+    return request_json_with_retry(
+        client,
+        url,
+        params=params,
+        error_cls=OpenMeteoError,
+        source_name="Open-Meteo",
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
+        validate_payload=_validate_open_meteo_payload,
+    )
 
 
 def parse_open_meteo_hourly(
@@ -209,11 +195,13 @@ def fetch_open_meteo_weather(
     past_days: int = 2,
     forecast_days: int = 2,
     client: httpx.Client | None = None,
-    max_retries: int = 2,
-    backoff_seconds: float = 0.4,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Fetch hourly Lahore weather observations + short-term forecast from Open-Meteo."""
     cfg = settings or get_settings()
+    retries = cfg.http_max_retries if max_retries is None else max_retries
+    backoff = cfg.http_backoff_seconds if backoff_seconds is None else backoff_seconds
     params = {
         "latitude": cfg.lahore_lat,
         "longitude": cfg.lahore_lon,
@@ -229,8 +217,8 @@ def fetch_open_meteo_weather(
             http,
             cfg.open_meteo_forecast_url,
             params,
-            max_retries=max_retries,
-            backoff_seconds=backoff_seconds,
+            max_retries=retries,
+            backoff_seconds=backoff,
         )
         return parse_open_meteo_hourly(payload, expected_columns=OPEN_METEO_WEATHER_FIELDS)
     finally:
@@ -247,11 +235,13 @@ def fetch_open_meteo_air_quality(
     end_date: date | str | None = None,
     include_uv_fallback: bool = False,
     client: httpx.Client | None = None,
-    max_retries: int = 2,
-    backoff_seconds: float = 0.4,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Fetch hourly Lahore pollutants and US AQI from Open-Meteo Air Quality API."""
     cfg = settings or get_settings()
+    retries = cfg.http_max_retries if max_retries is None else max_retries
+    backoff = cfg.http_backoff_seconds if backoff_seconds is None else backoff_seconds
     fields = list(OPEN_METEO_AIR_QUALITY_FIELDS)
     if include_uv_fallback and "uv_index" not in fields:
         fields.append("uv_index")
@@ -276,8 +266,8 @@ def fetch_open_meteo_air_quality(
             http,
             cfg.open_meteo_air_quality_url,
             params,
-            max_retries=max_retries,
-            backoff_seconds=backoff_seconds,
+            max_retries=retries,
+            backoff_seconds=backoff,
         )
         return parse_open_meteo_hourly(payload, expected_columns=fields)
     finally:
@@ -292,11 +282,13 @@ def fetch_open_meteo_forecast(
     forecast_days: int = 2,
     client: httpx.Client | None = None,
     allow_partial: bool = True,
-    max_retries: int = 2,
-    backoff_seconds: float = 0.4,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Fetch and merge Open-Meteo hourly weather and air-quality series for Lahore."""
     cfg = settings or get_settings()
+    retries = cfg.http_max_retries if max_retries is None else max_retries
+    backoff = cfg.http_backoff_seconds if backoff_seconds is None else backoff_seconds
     own_client = client is None
     http = client or httpx.Client(timeout=cfg.http_timeout_seconds)
     weather_df: pd.DataFrame | None = None
@@ -310,8 +302,8 @@ def fetch_open_meteo_forecast(
                 past_days=past_days,
                 forecast_days=forecast_days,
                 client=http,
-                max_retries=max_retries,
-                backoff_seconds=backoff_seconds,
+                max_retries=retries,
+                backoff_seconds=backoff,
             )
         except OpenMeteoError as exc:
             errors.append(str(exc))
@@ -325,8 +317,8 @@ def fetch_open_meteo_forecast(
                 past_days=past_days,
                 forecast_days=forecast_days,
                 client=http,
-                max_retries=max_retries,
-                backoff_seconds=backoff_seconds,
+                max_retries=retries,
+                backoff_seconds=backoff,
             )
         except OpenMeteoError as exc:
             errors.append(str(exc))
@@ -357,10 +349,11 @@ def fetch_open_meteo_historical(
     settings: Settings | None = None,
     *,
     client: httpx.Client | None = None,
-    chunk_days: int = 90,
+    chunk_days: int | None = None,
+    chunk_delay_seconds: float | None = None,
     allow_partial: bool = True,
-    max_retries: int = 2,
-    backoff_seconds: float = 0.4,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Fetch chunked historical weather (Archive + Historical Forecast) and AQI for Lahore."""
     cfg = settings or get_settings()
@@ -368,8 +361,16 @@ def fetch_open_meteo_historical(
     end_d = _coerce_date(end_date)
     if start_d > end_d:
         raise ValueError(f"start_date ({start_d}) must be <= end_date ({end_d}).")
-    if chunk_days < 1:
+    resolved_chunk_days = cfg.open_meteo_chunk_days if chunk_days is None else chunk_days
+    if resolved_chunk_days < 1:
         raise ValueError("chunk_days must be >= 1.")
+    retries = cfg.http_max_retries if max_retries is None else max_retries
+    backoff = cfg.http_backoff_seconds if backoff_seconds is None else backoff_seconds
+    pace_delay = (
+        cfg.open_meteo_chunk_delay_seconds
+        if chunk_delay_seconds is None
+        else chunk_delay_seconds
+    )
 
     own_client = client is None
     http = client or httpx.Client(timeout=cfg.http_timeout_seconds)
@@ -378,15 +379,15 @@ def fetch_open_meteo_historical(
     try:
         cursor = start_d
         while cursor <= end_d:
-            chunk_end = min(cursor + timedelta(days=chunk_days - 1), end_d)
+            chunk_end = min(cursor + timedelta(days=resolved_chunk_days - 1), end_d)
             weather_df = _fetch_historical_weather_chunk(
                 cfg,
                 http,
                 cursor,
                 chunk_end,
                 allow_partial=allow_partial,
-                max_retries=max_retries,
-                backoff_seconds=backoff_seconds,
+                max_retries=retries,
+                backoff_seconds=backoff,
             )
 
             aq_df: pd.DataFrame | None = None
@@ -397,8 +398,8 @@ def fetch_open_meteo_historical(
                     end_date=chunk_end,
                     include_uv_fallback=True,
                     client=http,
-                    max_retries=max_retries,
-                    backoff_seconds=backoff_seconds,
+                    max_retries=retries,
+                    backoff_seconds=backoff,
                 )
             except OpenMeteoError as exc:
                 if not allow_partial or weather_df is None:
@@ -418,6 +419,8 @@ def fetch_open_meteo_historical(
             merged = _merge_open_meteo_frames(weather_df, aq_df)
             chunks.append(merged)
             cursor = chunk_end + timedelta(days=1)
+            if cursor <= end_d and pace_delay > 0:
+                time.sleep(pace_delay)
 
         if not chunks:
             return pd.DataFrame(columns=["timestamp_utc", *ALL_OPEN_METEO_COLUMNS])
@@ -492,7 +495,7 @@ def _fetch_historical_weather_chunk(
         )
     except OpenMeteoError as exc:
         errors.append(str(exc))
-        logger.debug(
+        logger.warning(
             "Open-Meteo historical-forecast supplement unavailable for %s..%s: %s",
             start_d,
             end_d,

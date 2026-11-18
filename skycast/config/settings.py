@@ -414,6 +414,7 @@ class Settings(BaseSettings):
     city_name: str = "Lahore"
     lahore_lat: float = Field(default=31.5204, ge=-90.0, le=90.0)
     lahore_lon: float = Field(default=74.3587, ge=-180.0, le=180.0)
+    lahore_elevation_m: float = Field(default=217.0, ge=-500.0, le=9000.0)
     lahore_timezone: str = "Asia/Karachi"
 
     # --- External Data Sources (No Key Required) ---
@@ -424,8 +425,14 @@ class Settings(BaseSettings):
     )
     open_meteo_air_quality_url: str = "https://air-quality-api.open-meteo.com/v1/air-quality"
     met_no_forecast_url: str = "https://api.met.no/weatherapi/locationforecast/2.0/complete"
-    met_no_user_agent: str = "SkyCast-10Pearls-Portfolio/1.0"
+    met_no_user_agent: str = (
+        "SkyCast-10Pearls-Portfolio/1.0 (+https://github.com/ahsankamran613-svg/SkyCast)"
+    )
     http_timeout_seconds: float = Field(default=20.0, gt=0.0)
+    http_max_retries: int = Field(default=2, ge=0)
+    http_backoff_seconds: float = Field(default=0.4, ge=0.0)
+    open_meteo_chunk_days: int = Field(default=90, ge=1, le=366)
+    open_meteo_chunk_delay_seconds: float = Field(default=0.25, ge=0.0)
 
     # --- Fusion, Imputation & Feature Engineering ---
     open_meteo_fusion_weight: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -433,6 +440,12 @@ class Settings(BaseSettings):
     imputation_short_gap_hours: int = Field(default=3, ge=1)
     imputation_medium_gap_hours: int = Field(default=24, ge=4)
     imputation_diurnal_lookback_days: int = Field(default=7, ge=1)
+    imputation_damping_tau_hours: float = Field(default=12.0, gt=0.0)
+    max_imputation_rate_pct: float = Field(default=50.0, gt=0.0, le=100.0)
+    backfill_default_days: int = Field(default=90, ge=1)
+    backfill_max_days: int = Field(default=365, ge=1)
+    hourly_lookback_hours: int = Field(default=168, ge=1)
+    hourly_upsert_cutoff_hours: int = Field(default=48, ge=1)
     forecast_horizon_hours: int = Field(default=24, ge=1, le=72)
     supabase_history_days: int = Field(default=14, ge=1)
     lag_hours: tuple[int, ...] = (1, 3, 6, 12, 24, 48)

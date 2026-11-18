@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import time
 from typing import Any
 
 import httpx
@@ -11,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from skycast.config.settings import Settings, get_settings
+from skycast.data.sources._http import request_json_with_retry
 
 MET_NO_OUTPUT_COLUMNS: tuple[str, ...] = (
     "air_temperature",
@@ -133,6 +133,40 @@ def compute_steadman_apparent_temperature(
     return t + 0.33 * vapor_pressure - 0.70 * v_clamped - 4.00
 
 
+def sea_level_to_surface_pressure(
+    pressure_msl_hpa: float | None,
+    elevation_m: float,
+    temp_c: float | None = None,
+) -> float | None:
+    """Convert sea-level pressure (hPa) to station surface pressure at `elevation_m`."""
+    if pressure_msl_hpa is None:
+        return None
+    try:
+        p_msl = float(pressure_msl_hpa)
+        elev = float(elevation_m)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(p_msl) or math.isnan(elev):
+        return None
+    if abs(elev) < 1e-6:
+        return p_msl
+
+    temp_k = 288.15
+    if temp_c is not None:
+        try:
+            t_val = float(temp_c)
+            if not math.isnan(t_val):
+                temp_k = max(180.0, min(340.0, t_val + 273.15))
+        except (TypeError, ValueError):
+            pass
+
+    lapse = 0.0065
+    ratio = 1.0 - (lapse * elev) / (temp_k + lapse * elev)
+    if ratio <= 0.0:
+        return None
+    return p_msl * (ratio**5.25588)
+
+
 def _normalize_symbol_code(symbol_code: str | None) -> str | None:
     if not symbol_code:
         return None
@@ -142,6 +176,11 @@ def _normalize_symbol_code(symbol_code: str | None) -> str | None:
             normalized = normalized[: -len(suffix)]
             break
     return normalized or None
+
+
+def normalize_symbol_code(symbol_code: str | None) -> str | None:
+    """Normalize a Met.no `symbol_code` by removing day/night/polar-twilight suffixes."""
+    return _normalize_symbol_code(symbol_code)
 
 
 def metno_symbol_to_wmo_code(symbol_code: str | None) -> int | None:
@@ -171,14 +210,16 @@ def metno_symbol_to_wmo_code(symbol_code: str | None) -> int | None:
 def wmo_code_to_symbol(weather_code: int | float | None) -> str:
     """Map a WMO weather code to a human-readable Met.no-compatible condition symbol."""
     if weather_code is None:
-        return "partlycloudy"
+        return "unknown"
     try:
         if pd.isna(weather_code):
-            return "partlycloudy"
+            return "unknown"
         code = int(round(float(weather_code)))
     except (TypeError, ValueError):
-        return "partlycloudy"
+        return "unknown"
 
+    if code < 0:
+        return "unknown"
     if code in _WMO_TO_SYMBOL:
         return _WMO_TO_SYMBOL[code]
     if code >= 95:
@@ -320,11 +361,13 @@ def fetch_met_no_forecast(
     settings: Settings | None = None,
     *,
     client: httpx.Client | None = None,
-    max_retries: int = 2,
-    backoff_seconds: float = 0.4,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Fetch Lahore hourly forecast from Met.no Locationforecast 2.0."""
     cfg = settings or get_settings()
+    retries = cfg.http_max_retries if max_retries is None else max_retries
+    backoff = cfg.http_backoff_seconds if backoff_seconds is None else backoff_seconds
     headers = {
         "User-Agent": cfg.met_no_user_agent,
         "Accept": "application/json",
@@ -336,38 +379,18 @@ def fetch_met_no_forecast(
 
     own_client = client is None
     http = client or httpx.Client(timeout=cfg.http_timeout_seconds)
-    last_exc: Exception | None = None
-
     try:
-        for attempt in range(max_retries + 1):
-            try:
-                response = http.get(cfg.met_no_forecast_url, params=params, headers=headers)
-                if response.status_code in {429, 500, 502, 503, 504} and attempt < max_retries:
-                    if backoff_seconds > 0:
-                        time.sleep(backoff_seconds * (attempt + 1))
-                    continue
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise MetNoError(
-                        f"Expected JSON object from Met.no, got {type(payload).__name__}"
-                    )
-                return parse_met_no_timeseries(payload)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_exc = exc
-                if attempt < max_retries:
-                    if backoff_seconds > 0:
-                        time.sleep(backoff_seconds * (attempt + 1))
-                    continue
-                raise MetNoError(f"Met.no network error: {exc}") from exc
-            except httpx.HTTPStatusError as exc:
-                raise MetNoError(
-                    f"Met.no HTTP {exc.response.status_code}: {exc.response.text[:300]}"
-                ) from exc
-            except ValueError as exc:
-                raise MetNoError(f"Invalid JSON from Met.no: {exc}") from exc
-
-        raise MetNoError(f"Met.no request failed: {last_exc}")
+        payload = request_json_with_retry(
+            http,
+            cfg.met_no_forecast_url,
+            params=params,
+            headers=headers,
+            error_cls=MetNoError,
+            source_name="Met.no",
+            max_retries=retries,
+            backoff_seconds=backoff,
+        )
+        return parse_met_no_timeseries(payload)
     finally:
         if own_client:
             http.close()

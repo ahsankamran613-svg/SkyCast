@@ -2,9 +2,12 @@
 
 from skycast.data.fusion import (
     CANONICAL_FUSED_COLUMNS,
+    DOMAIN_CLAMP_BOUNDS,
     RAW_TRANSPARENCY_COLUMNS,
     SourceFusionError,
     fuse_weather_sources,
+    weighted_circular_fuse,
+    weighted_linear_fuse,
 )
 from skycast.data.imputation import (
     ALL_IMPUTED_TARGET_COLUMNS,
@@ -28,6 +31,7 @@ __all__ = [
     "ALL_IMPUTED_TARGET_COLUMNS",
     "CANONICAL_FUSED_COLUMNS",
     "CONTINUOUS_IMPUTE_COLUMNS",
+    "DOMAIN_CLAMP_BOUNDS",
     "ImputationAuditReport",
     "ImputationResult",
     "RAW_TRANSPARENCY_COLUMNS",
@@ -42,4 +46,6 @@ __all__ = [
     "dataframe_to_supabase_weather_records",
     "fuse_weather_sources",
     "impute_weather_dataframe",
+    "weighted_circular_fuse",
+    "weighted_linear_fuse",
 ]
