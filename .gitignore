@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+eggs/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+
+# Local offline mode store & scratch artifacts
+.skycast_local/
+local_store/
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend
+web/node_modules/
+web/dist/
+web/dist-ssr/
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
