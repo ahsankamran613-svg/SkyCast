@@ -13,6 +13,8 @@ eggs/
 .ruff_cache/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
 
 # Virtual environments
 .venv/
@@ -30,11 +32,21 @@ local_store/
 *.db
 *.sqlite
 *.sqlite3
+docs/eda_summary.json
 
-# Frontend
+# ML model artifacts
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.onnx
+
+# Frontend & deployment
 web/node_modules/
 web/dist/
 web/dist-ssr/
+*.tsbuildinfo
+.vercel/
 
 # Logs & OS
 *.log

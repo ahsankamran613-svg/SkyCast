@@ -40,6 +40,7 @@ ml = [
 dev = [
     "pytest>=9.0.0,<10.0",
     "pytest-httpx>=0.36.0,<1.0",
+    "pytest-xdist>=3.6.0,<4.0",
 ]
 all = ["skycast[ml,dev]"]
 
@@ -50,4 +51,4 @@ include = ["skycast*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-ra"
+addopts = "-ra -n auto --maxprocesses=3 --dist load --maxschedchunk=1"

@@ -502,6 +502,7 @@ class Settings(BaseSettings):
     sarimax_order: tuple[int, int, int] = (1, 0, 1)
     sarimax_seasonal_order: tuple[int, int, int, int] = (1, 1, 0, 24)
     sarimax_conf_alpha: float = 0.2
+    sarimax_maxiter: int = Field(default=50, ge=1)
 
     rf_n_estimators: int = 200
     rf_max_depth: int = 12

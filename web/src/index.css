@@ -232,6 +232,15 @@
   --color-alert-warning-bg: var(--alert-warning-bg);
   --color-alert-critical: var(--alert-critical);
   --color-alert-critical-bg: var(--alert-critical-bg);
+
+  /* Models and explainability */
+  --color-model-sarimax: var(--model-sarimax);
+  --color-model-rf: var(--model-rf);
+  --color-model-ridge: var(--model-ridge);
+  --color-model-lstm: var(--model-lstm);
+  --color-model-naive: var(--model-naive);
+  --color-shap-pos: var(--shap-pos);
+  --color-shap-neg: var(--shap-neg);
 }
 
 @layer base {
