@@ -2,7 +2,6 @@
 
 **Project:** Serverless Agentic Multi-Metric Weather & Air Quality Forecasting System  
 **Target City:** Lahore, Pakistan (`31.5204° N, 74.3587° E`, Elevation `217 m`, Timezone `Asia/Karachi` / PKT)  
-**Track:** 10Pearls SHINE Internship Cohort 10  
 **Reference Benchmark Window:** `2026-10-19T13:00Z` – `2026-11-19T13:00Z` (721 historical training hours; 745 total hours after live hourly ingestion; Training Run `train-20261119T133423Z-40deb2`; Hourly Agent Run `hourly-20261119T130000Z-543174`)
 
 ---
