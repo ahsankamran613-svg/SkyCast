@@ -179,11 +179,6 @@ def promote_champion_if_better(
                         f"(H={candidate_model.horizon_hours}h)"
                     ),
                     input_example=sanitized_example,
-                    tags={
-                        "metric": metric,
-                        "model_family": candidate_model.family_name,
-                        "train_run_id": str(candidate_metrics.get("train_run_id") or ""),
-                    },
                 )
                 saved = created.save(str(stage_dir))
             except Exception as exc:

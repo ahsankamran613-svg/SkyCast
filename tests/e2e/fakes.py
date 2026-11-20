@@ -1598,7 +1598,7 @@ class MockHopsworksModel:
         description: str | None = None,
         input_example: Any = None,
         model_schema: Any = None,
-        tags: Mapping[str, Any] | None = None,
+        tags: Any = None,
         project_name: str = "skycast_e2e",
     ) -> None:
         self._registry = registry
@@ -1608,7 +1608,10 @@ class MockHopsworksModel:
         self.description = description
         self.input_example = input_example
         self.model_schema = model_schema
-        self.tags: dict[str, Any] = dict(tags or {})
+        if isinstance(tags, list):
+            self.tags: dict[str, Any] = {str(t["name"]): t["value"] for t in tags if isinstance(t, Mapping) and "name" in t}
+        else:
+            self.tags = dict(tags or {})
         self.project_name = project_name
         self.id = f"{name}_v{self.version}"
         self.model_files_path: Path | None = None

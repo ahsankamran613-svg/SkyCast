@@ -1043,6 +1043,7 @@ class SkyCastStorage:
                 primary_key=["timestamp_epoch_ms"],
                 event_time="timestamp_utc",
                 online_enabled=True,
+                time_travel_format="HUDI",
             )
             fg.insert(hw_df, write_options={"wait_for_job": False})
             return len(hw_df)
@@ -2364,6 +2365,7 @@ class SkyCastStorage:
                 primary_key=["run_id", "metric", "model_family", "horizon_hour"],
                 event_time="issued_at_utc",
                 online_enabled=True,
+                time_travel_format="HUDI",
             )
             fg.insert(hw_df, write_options={"wait_for_job": False})
             return len(hw_df)
@@ -3165,7 +3167,8 @@ class SkyCastStorage:
                 description="Agentic LLM invocation and failover telemetry log.",
                 primary_key=["log_uid"],
                 event_time="timestamp_utc",
-                online_enabled=True,
+                online_enabled=False,
+                time_travel_format="HUDI",
             )
             fg.insert(hw_df, write_options={"wait_for_job": False})
             return len(hw_df)
@@ -3702,7 +3705,8 @@ class SkyCastStorage:
                 description="Data drift (PSI/KS) and model drift (RMSE ratio) detection logs.",
                 primary_key=["log_uid"],
                 event_time="timestamp",
-                online_enabled=True,
+                online_enabled=False,
+                time_travel_format="HUDI",
             )
             fg.insert(hw_df, write_options={"wait_for_job": False})
             return len(hw_df)

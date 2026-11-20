@@ -78,7 +78,7 @@ def test_llm_fallback_chain_and_low_reasoning_enforcement(monkeypatch: pytest.Mo
     assert FALLBACK_LLM_PROVIDER == "gemini"
     assert FALLBACK_LLM_MODEL == "gemini-3.5-flash-lite"
     assert TERTIARY_LLM_PROVIDER == "groq"
-    assert TERTIARY_LLM_MODEL == "qwen-3.8-27b"
+    assert TERTIARY_LLM_MODEL == "qwen/qwen3.8-27b"
     assert GROQ_REASONING_EFFORT == "low"
 
     cfg = Settings(_env_file=None)
@@ -87,7 +87,7 @@ def test_llm_fallback_chain_and_low_reasoning_enforcement(monkeypatch: pytest.Mo
     assert [step["model"] for step in chain] == [
         "openai/gpt-oss-120b",
         "gemini-3.5-flash-lite",
-        "qwen-3.8-27b",
+        "qwen/qwen3.8-27b",
     ]
     assert chain[0]["reasoning_effort"] == "low"
     assert chain[1]["reasoning_effort"] is None
@@ -186,7 +186,7 @@ def test_env_example_contains_required_keys() -> None:
         "VITE_SUPABASE_ANON_KEY=",
         "GROQ_API_KEY=",
         "GROQ_PRIMARY_MODEL=openai/gpt-oss-120b",
-        "GROQ_TERTIARY_MODEL=qwen-3.8-27b",
+        "GROQ_TERTIARY_MODEL=qwen/qwen3.8-27b",
         "GROQ_REASONING_EFFORT=low",
         "GEMINI_API_KEY=",
         "GEMINI_FALLBACK_MODEL=gemini-3.5-flash-lite",

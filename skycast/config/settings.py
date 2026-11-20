@@ -18,7 +18,7 @@ PRIMARY_LLM_MODEL = "openai/gpt-oss-120b"
 FALLBACK_LLM_PROVIDER = "gemini"
 FALLBACK_LLM_MODEL = "gemini-3.5-flash-lite"
 TERTIARY_LLM_PROVIDER = "groq"
-TERTIARY_LLM_MODEL = "qwen-3.8-27b"
+TERTIARY_LLM_MODEL = "qwen/qwen3.8-27b"
 GROQ_REASONING_EFFORT = "low"  # Both Groq API models must use low reasoning.
 
 SeverityLevel = Literal["info", "warning", "critical"]
@@ -457,7 +457,7 @@ class Settings(BaseSettings):
     # --- Hopsworks Serverless (Feature Store & Model Registry) ---
     hopsworks_api_key: str = ""
     hopsworks_project_name: str = ""
-    hopsworks_host: str = "c.app.hopsworks.ai"
+    hopsworks_host: str = "eu-west.cloud.hopsworks.ai"
     hopsworks_feature_group_name: str = "lahore_weather_features"
     hopsworks_feature_group_version: int = 1
     hopsworks_forecast_ledger_fg: str = "lahore_forecast_ledger"
@@ -553,7 +553,7 @@ class Settings(BaseSettings):
         if normalized != "low":
             raise ValueError(
                 "GROQ_REASONING_EFFORT must be 'low' for both Groq models "
-                "(openai/gpt-oss-120b and qwen-3.8-27b)."
+                "(openai/gpt-oss-120b and qwen/qwen3.8-27b)."
             )
         return normalized
 
