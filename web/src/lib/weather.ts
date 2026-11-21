@@ -52,38 +52,200 @@ const SOURCE_LABELS: Record<string, string> = {
   "met.no": "Met.no",
 }
 
-const KNOWN_FEATURE_LABELS: Record<string, string> = {
-  us_aqi: "Air quality",
-  temperature_2m: "Temperature",
-  apparent_temperature: "Feels like temperature",
-  precipitation_mm: "Precipitation",
-  precipitation_prob: "Chance of rain",
-  relative_humidity_2m: "Humidity",
-  uv_index: "UV index",
-  wind_speed_10m: "Wind speed",
-  wind_direction_10m: "Wind direction",
-  wind_dir_sin: "Wind direction (N/S)",
-  wind_dir_cos: "Wind direction (E/W)",
-  surface_pressure: "Surface pressure",
-  cloud_cover: "Cloud cover",
-  weather_code: "Weather condition",
-  pm2_5: "PM2.5",
-  pm10: "PM10",
-  ozone: "Ozone (O3)",
-  nitrogen_dioxide: "Nitrogen dioxide (NO2)",
-  sulphur_dioxide: "Sulphur dioxide (SO2)",
-  carbon_monoxide: "Carbon monoxide (CO)",
-  hour_sin: "Time of day (cycle)",
-  hour_cos: "Time of day (phase)",
-  day_of_week_sin: "Day of week (cycle)",
-  day_of_week_cos: "Day of week (phase)",
-  month_sin: "Season of year (cycle)",
-  month_cos: "Season of year (phase)",
-  is_weekend: "Weekend indicator",
-  is_lahore_smog_season: "Smog season",
-  is_monsoon_season: "Monsoon season",
-  source_disagreement_temp: "Source temperature spread",
+interface BaseFeatureDef {
+  label: string
+  description: string
+  unit?: string
 }
+
+const KNOWN_FEATURE_DEFS: Record<string, BaseFeatureDef> = {
+  us_aqi: {
+    label: "Air quality (AQI)",
+    description: "Current US Air Quality Index (higher means more polluted).",
+    unit: "AQI",
+  },
+  temperature_2m: {
+    label: "Temperature",
+    description: "Air temperature measured 2 meters above ground.",
+    unit: "°C",
+  },
+  apparent_temperature: {
+    label: "Feels-like temperature",
+    description: "Perceived temperature combining heat, humidity, and wind.",
+    unit: "°C",
+  },
+  precipitation_mm: {
+    label: "Rainfall",
+    description: "Hourly precipitation amount.",
+    unit: "mm/h",
+  },
+  precipitation_prob: {
+    label: "Chance of rain",
+    description: "Estimated probability of rain for the hour.",
+    unit: "%",
+  },
+  relative_humidity_2m: {
+    label: "Humidity",
+    description: "Relative moisture in the air at 2 meters above ground.",
+    unit: "%",
+  },
+  uv_index: {
+    label: "UV index",
+    description: "Ultraviolet sunlight intensity (0 at night, highest at midday).",
+  },
+  wind_speed_10m: {
+    label: "Wind speed",
+    description: "Wind speed measured 10 meters above ground.",
+    unit: "km/h",
+  },
+  wind_direction_10m: {
+    label: "Wind direction",
+    description: "Compass direction the wind is blowing from (0°–360°).",
+    unit: "°",
+  },
+  wind_dir_sin: {
+    label: "Wind direction (N/S)",
+    description: "North–south component of the wind direction.",
+  },
+  wind_dir_cos: {
+    label: "Wind direction (E/W)",
+    description: "East–west component of the wind direction.",
+  },
+  wind_u: {
+    label: "East–west wind",
+    description: "East-to-west wind velocity component.",
+    unit: "km/h",
+  },
+  wind_v: {
+    label: "North–south wind",
+    description: "North-to-south wind velocity component.",
+    unit: "km/h",
+  },
+  surface_pressure: {
+    label: "Air pressure",
+    description: "Atmospheric pressure at ground level (shifts signal incoming weather).",
+    unit: "hPa",
+  },
+  cloud_cover: {
+    label: "Cloud cover",
+    description: "Percentage of sky covered by clouds.",
+    unit: "%",
+  },
+  weather_code: {
+    label: "Weather condition",
+    description: "Standard WMO sky and precipitation condition code.",
+  },
+  pm2_5: {
+    label: "PM2.5",
+    description: "Fine airborne smoke/dust particles smaller than 2.5 microns.",
+    unit: "µg/m³",
+  },
+  pm10: {
+    label: "PM10",
+    description: "Coarse airborne dust particles smaller than 10 microns.",
+    unit: "µg/m³",
+  },
+  ozone: {
+    label: "Ozone (O3)",
+    description: "Ground-level ozone concentration.",
+    unit: "µg/m³",
+  },
+  nitrogen_dioxide: {
+    label: "Nitrogen dioxide (NO2)",
+    description: "Traffic and combustion pollutant concentration.",
+    unit: "µg/m³",
+  },
+  sulphur_dioxide: {
+    label: "Sulphur dioxide (SO2)",
+    description: "Industrial and fuel-burning pollutant concentration.",
+    unit: "µg/m³",
+  },
+  carbon_monoxide: {
+    label: "Carbon monoxide (CO)",
+    description: "Combustion gas concentration in the air.",
+    unit: "µg/m³",
+  },
+  hour_sin: {
+    label: "Time of day (cycle)",
+    description: "Smooth 24-hour clock signal capturing morning vs. evening.",
+  },
+  hour_cos: {
+    label: "Time of day (phase)",
+    description: "Smooth 24-hour clock signal capturing midday vs. midnight.",
+  },
+  day_of_week_sin: {
+    label: "Day of week (cycle)",
+    description: "Weekly cycle capturing weekday vs. weekend patterns.",
+  },
+  day_of_week_cos: {
+    label: "Day of week (phase)",
+    description: "Weekly cycle phase capturing mid-week vs. weekend shifts.",
+  },
+  month_sin: {
+    label: "Season of year (cycle)",
+    description: "Annual seasonal cycle capturing spring vs. autumn transitions.",
+  },
+  month_cos: {
+    label: "Season of year (phase)",
+    description: "Annual seasonal phase capturing summer vs. winter.",
+  },
+  is_weekend: {
+    label: "Weekend",
+    description: "Indicates Saturday or Sunday (typically lower commuter emissions).",
+  },
+  is_lahore_smog_season: {
+    label: "Smog season",
+    description: "Indicates Lahore's winter smog months (Oct–Feb).",
+  },
+  is_monsoon_season: {
+    label: "Monsoon season",
+    description: "Indicates Lahore's monsoon months (Jul–Sep).",
+  },
+  source_disagreement_temp: {
+    label: "Source temperature spread",
+    description: "Temperature difference between Open-Meteo and Met.no readings.",
+    unit: "°C",
+  },
+  source_count: {
+    label: "Active weather sources",
+    description: "Number of live weather providers reporting for this hour.",
+  },
+  is_dual_source: {
+    label: "Dual-source verified",
+    description: "Whether both Open-Meteo and Met.no reported readings this hour.",
+  },
+  temp_apparent_delta: {
+    label: "Feels-like gap",
+    description: "Difference between feels-like and actual air temperature.",
+    unit: "°C",
+  },
+  heat_stress_index: {
+    label: "Heat-humidity index",
+    description: "Combined heat and humidity discomfort indicator.",
+  },
+  pm25_pm10_ratio: {
+    label: "Fine-to-coarse dust ratio",
+    description: "Share of fine smoke particles (PM2.5) relative to coarse dust (PM10).",
+  },
+  aqi_wind_dispersion: {
+    label: "Wind air-clearing factor",
+    description: "Air pollution adjusted for wind speed (calm winds trap smog).",
+  },
+  temp_diurnal_anomaly: {
+    label: "Temp vs. 24h average",
+    description: "How much warmer or cooler it is now compared to the past 24h average.",
+    unit: "°C",
+  },
+  aqi_diurnal_anomaly: {
+    label: "Air quality vs. 24h average",
+    description: "How much better or worse air quality is now compared to the past 24h average.",
+    unit: "AQI",
+  },
+}
+
+const KNOWN_FEATURE_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(KNOWN_FEATURE_DEFS).map(([k, v]) => [k, v.label])
+)
 
 const DRIFT_TEST_LABELS: Record<string, string> = {
   psi_ks: "Distribution shift (PSI & KS)",
@@ -253,67 +415,181 @@ export function formatSourceLabel(source: string): string {
   return SOURCE_LABELS[normalized] ?? humanizeIdentifier(source)
 }
 
-export function formatFeatureName(feature: string | null | undefined): string {
+export interface FeatureMeta {
+  label: string
+  description: string
+  unit: string
+  raw: string
+}
+
+function lowerPhrasePreservingAcronyms(label: string): string {
+  // Keep acronyms like UV, PM2.5, PM10, AQI, O3, NO2, SO2, CO, N/S, E/W uppercase.
+  return label.replace(/^[A-Z](?=[a-z])/, (ch) => ch.toLowerCase())
+}
+
+function resolveBaseDef(baseKey: string): BaseFeatureDef {
+  const exact = KNOWN_FEATURE_DEFS[baseKey]
+  if (exact) return exact
+  const label = humanizeIdentifier(baseKey)
+  return {
+    label,
+    description: `Observed ${lowerPhrasePreservingAcronyms(label)} signal.`,
+  }
+}
+
+function formatRollStatMeta(
+  baseKey: string,
+  hours: string,
+  stat: string,
+  raw: string
+): FeatureMeta {
+  const base = resolveBaseDef(baseKey)
+  const phrase = lowerPhrasePreservingAcronyms(base.label)
+  const unit = base.unit ?? ""
+
+  if (stat === "mean") {
+    return {
+      label: `${hours}h avg ${phrase}`,
+      description: `Average ${phrase} over the past ${hours} hours.`,
+      unit,
+      raw,
+    }
+  }
+  if (stat === "max") {
+    return {
+      label: `${hours}h peak ${phrase}`,
+      description: `Highest ${phrase} recorded over the past ${hours} hours.`,
+      unit,
+      raw,
+    }
+  }
+  if (stat === "min") {
+    return {
+      label: `${hours}h lowest ${phrase}`,
+      description: `Lowest ${phrase} recorded over the past ${hours} hours.`,
+      unit,
+      raw,
+    }
+  }
+  if (stat === "std") {
+    return {
+      label: `${hours}h ${phrase} variation`,
+      description: `How much ${phrase} fluctuated over the past ${hours} hours (rolling std).`,
+      unit,
+      raw,
+    }
+  }
+  return {
+    label: `${hours}h ${phrase} (${stat})`,
+    description: `${hours}-hour rolling ${stat} of ${phrase}.`,
+    unit,
+    raw,
+  }
+}
+
+export function describeFeature(feature: string | null | undefined): FeatureMeta {
   if (!feature) {
-    return "—"
+    return { label: "—", description: "", unit: "", raw: "" }
   }
   const trimmed = feature.trim()
   if (!trimmed) {
-    return "—"
+    return { label: "—", description: "", unit: "", raw: "" }
   }
   const lower = trimmed.toLowerCase()
-  if (lower in KNOWN_FEATURE_LABELS) {
-    return KNOWN_FEATURE_LABELS[lower]
+
+  // 1. Exact base / derived feature match
+  if (lower in KNOWN_FEATURE_DEFS) {
+    const def = KNOWN_FEATURE_DEFS[lower]
+    return {
+      label: def.label,
+      description: def.description,
+      unit: def.unit ?? "",
+      raw: trimmed,
+    }
   }
 
-  // Handle patterns like `lag_1h`, `temperature_2m_lag_6h`, `rolling_mean_24h`, `roc_3h`
+  // 2. Actual SkyCast rolling pattern: `{col}_roll_{w}h_{mean|std|min|max}`
+  const metricRoll = lower.match(/^(.+)_roll_(\d+)h_(mean|std|min|max)$/)
+  if (metricRoll) {
+    return formatRollStatMeta(metricRoll[1], metricRoll[2], metricRoll[3], trimmed)
+  }
+
+  // 3. Legacy rolling pattern: `{col}_rolling_{mean|std|min|max}_{w}h`
+  const metricRollingLegacy = lower.match(/^(.+)_rolling_(mean|std|min|max)_(\d+)h$/)
+  if (metricRollingLegacy) {
+    return formatRollStatMeta(
+      metricRollingLegacy[1],
+      metricRollingLegacy[3],
+      metricRollingLegacy[2],
+      trimmed
+    )
+  }
+
+  // 4. Metric lag pattern: `{col}_lag_{h}h`
+  const metricLag = lower.match(/^(.+)_lag_(\d+)h$/)
+  if (metricLag) {
+    const base = resolveBaseDef(metricLag[1])
+    const hrs = Number(metricLag[2])
+    const phrase = lowerPhrasePreservingAcronyms(base.label)
+    return {
+      label: `${base.label} (${hrs}h ago)`,
+      description:
+        hrs === 1
+          ? `${base.label} recorded 1 hour earlier.`
+          : `${base.label} recorded ${hrs} hours earlier (${phrase}).`,
+      unit: base.unit ?? "",
+      raw: trimmed,
+    }
+  }
+
+  // 5. Metric rate-of-change pattern: `{col}_roc_{k}h`
+  const metricRoc = lower.match(/^(.+)_roc_(\d+)h$/)
+  if (metricRoc) {
+    const base = resolveBaseDef(metricRoc[1])
+    const hrs = Number(metricRoc[2])
+    const phrase = lowerPhrasePreservingAcronyms(base.label)
+    return {
+      label: `${hrs}h ${phrase} change`,
+      description: `How much ${phrase} rose or fell over the past ${hrs} ${hrs === 1 ? "hour" : "hours"}.`,
+      unit: base.unit ?? "",
+      raw: trimmed,
+    }
+  }
+
+  // 6. Standalone shorthand patterns (`lag_1h`, `rolling_mean_24h`, `roc_3h`)
   const lagOnly = lower.match(/^lag_(\d+)h$/)
   if (lagOnly) {
     const hrs = Number(lagOnly[1])
-    return hrs === 1 ? "Previous hour value" : `Value ${hrs}h earlier`
-  }
-
-  const metricLag = lower.match(/^(.+)_lag_(\d+)h$/)
-  if (metricLag) {
-    const base = KNOWN_FEATURE_LABELS[metricLag[1]] ?? humanizeIdentifier(metricLag[1])
-    return `${base} (${metricLag[2]}h ago)`
-  }
-
-  const rollingOnly = lower.match(/^rolling_(mean|std|min|max)_(\d+)h$/)
-  if (rollingOnly) {
-    const statMap: Record<string, string> = {
-      mean: "average",
-      std: "variability",
-      min: "minimum",
-      max: "maximum",
+    return {
+      label: hrs === 1 ? "Previous hour value" : `Value ${hrs}h earlier`,
+      description: `Reading recorded ${hrs} ${hrs === 1 ? "hour" : "hours"} earlier.`,
+      unit: "",
+      raw: trimmed,
     }
-    return `${rollingOnly[2]}-hour ${statMap[rollingOnly[1]] ?? rollingOnly[1]}`
-  }
-
-  const metricRolling = lower.match(/^(.+)_rolling_(mean|std|min|max)_(\d+)h$/)
-  if (metricRolling) {
-    const base = KNOWN_FEATURE_LABELS[metricRolling[1]] ?? humanizeIdentifier(metricRolling[1])
-    const statMap: Record<string, string> = {
-      mean: "avg",
-      std: "spread",
-      min: "min",
-      max: "max",
-    }
-    return `${base} (${metricRolling[3]}h ${statMap[metricRolling[2]] ?? metricRolling[2]})`
   }
 
   const rocOnly = lower.match(/^roc_(\d+)h$/)
   if (rocOnly) {
-    return `${rocOnly[1]}-hour change`
+    const hrs = Number(rocOnly[1])
+    return {
+      label: `${hrs}h recent change`,
+      description: `How much the reading changed over the past ${hrs} ${hrs === 1 ? "hour" : "hours"}.`,
+      unit: "",
+      raw: trimmed,
+    }
   }
 
-  const metricRoc = lower.match(/^(.+)_roc_(\d+)h$/)
-  if (metricRoc) {
-    const base = KNOWN_FEATURE_LABELS[metricRoc[1]] ?? humanizeIdentifier(metricRoc[1])
-    return `${base} (${metricRoc[2]}h change)`
+  const fallback = humanizeIdentifier(trimmed)
+  return {
+    label: fallback,
+    description: `Engineered weather model signal (${trimmed}).`,
+    unit: "",
+    raw: trimmed,
   }
+}
 
-  return humanizeIdentifier(trimmed)
+export function formatFeatureName(feature: string | null | undefined): string {
+  return describeFeature(feature).label
 }
 
 export function formatLimeRule(rule: string | null | undefined): string {
@@ -330,6 +606,104 @@ export function formatLimeRule(rule: string | null | undefined): string {
     }
     return token
   })
+}
+
+function formatRuleNumber(raw: string): string {
+  const num = Number(raw)
+  if (!Number.isFinite(num)) {
+    return raw
+  }
+  if (Math.abs(num) >= 100) {
+    return num.toFixed(0)
+  }
+  const fixed = Math.abs(num) >= 10 ? num.toFixed(1) : num.toFixed(2)
+  return fixed.replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1")
+}
+
+/**
+ * Converts a raw LIME threshold rule (e.g. `18.40 < temperature_2m_lag_1h <= 25.10`)
+ * into a plain-English phrase readable by non-technical reviewers.
+ */
+export function humanizeLimeRule(rule: string | null | undefined): string {
+  if (!rule) {
+    return "—"
+  }
+  const trimmed = rule.trim()
+  if (!trimmed) {
+    return "—"
+  }
+
+  // Range: `low < feature <= high` (or <=, <)
+  const rangeMatch = trimmed.match(
+    /^(-?\d+(?:\.\d+)?)\s*(<=?)\s*([a-zA-Z][a-zA-Z0-9_]*)\s*(<=?)\s*(-?\d+(?:\.\d+)?)$/
+  )
+  if (rangeMatch) {
+    const [, low, , feat, , high] = rangeMatch
+    return `${formatFeatureName(feat)} is between ${formatRuleNumber(low)} and ${formatRuleNumber(high)}`
+  }
+
+  // Single comparison: `feature <= value` / `feature > value` / etc.
+  const singleMatch = trimmed.match(
+    /^([a-zA-Z][a-zA-Z0-9_]*)\s*(<=|>=|<|>|==|=)\s*(-?\d+(?:\.\d+)?)$/
+  )
+  if (singleMatch) {
+    const [, feat, op, val] = singleMatch
+    const name = formatFeatureName(feat)
+    const num = formatRuleNumber(val)
+    if (op === "<=") return `${name} is ${num} or lower`
+    if (op === "<") return `${name} is below ${num}`
+    if (op === ">=") return `${name} is ${num} or higher`
+    if (op === ">") return `${name} is above ${num}`
+    return `${name} is ${num}`
+  }
+
+  // Reversed single comparison: `value < feature`
+  const reversedMatch = trimmed.match(
+    /^(-?\d+(?:\.\d+)?)\s*(<=|>=|<|>)\s*([a-zA-Z][a-zA-Z0-9_]*)$/
+  )
+  if (reversedMatch) {
+    const [, val, op, feat] = reversedMatch
+    const name = formatFeatureName(feat)
+    const num = formatRuleNumber(val)
+    if (op === "<=") return `${name} is ${num} or higher`
+    if (op === "<") return `${name} is above ${num}`
+    if (op === ">=") return `${name} is ${num} or lower`
+    return `${name} is below ${num}`
+  }
+
+  return formatLimeRule(trimmed)
+}
+
+export type ComparisonModelKey =
+  | "sarimax"
+  | "random_forest"
+  | "ridge"
+  | "lstm"
+  | "naive_24h"
+
+export function mapModelFamilyToSeriesKey(
+  modelFamily: string | null | undefined
+): ComparisonModelKey | null {
+  if (!modelFamily) return null
+  const normalized = modelFamily.trim().toLowerCase()
+  if (normalized === "sarimax") return "sarimax"
+  if (
+    normalized === "random_forest" ||
+    normalized === "randomforest" ||
+    normalized === "rf"
+  ) {
+    return "random_forest"
+  }
+  if (normalized === "ridge") return "ridge"
+  if (normalized === "lstm") return "lstm"
+  if (
+    normalized === "naive_24h" ||
+    normalized === "naive24h" ||
+    normalized === "naive"
+  ) {
+    return "naive_24h"
+  }
+  return null
 }
 
 export function formatDriftTestName(testName: string | null | undefined): string {

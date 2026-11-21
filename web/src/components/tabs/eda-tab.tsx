@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Database,
+  GitCompareArrows,
   Grid2x2,
   Layers,
   ShieldAlert,
@@ -8,6 +13,7 @@ import {
 } from "lucide-react"
 import { cn } from "cn"
 import {
+  Area,
   Bar,
   BarChart,
   CartesianGrid,
@@ -27,6 +33,7 @@ import {
   useFirstLoadChartAnimation,
   type TooltipEntryRow,
 } from "@/components/shared/chart-primitives"
+import { EdaCorrelationsCard } from "@/components/shared/eda-correlations-card"
 import {
   BootstrappingState,
   EmptyState,
@@ -34,6 +41,7 @@ import {
 } from "@/components/shared/empty-state"
 import { TimestampPkt } from "@/components/shared/timestamp-pkt"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
 import {
   Select,
@@ -81,7 +89,9 @@ export interface EdaTabProps {
   onShellRefresh?: () => void
 }
 
+type EdaSubTab = "patterns" | "relationships" | "trends"
 type DiurnalAggregateMode = "mean" | "median"
+type DiurnalDisplayMode = "curve" | "heatmap"
 type DecompositionViewMode = "cycle" | "trend" | "components"
 
 const HEAT_TOKENS = [
@@ -99,6 +109,16 @@ interface HistogramChartRow extends Record<string, unknown> {
   count: number
 }
 
+interface DiurnalCurveRow extends Record<string, unknown> {
+  hour: number
+  hourLabel: string
+  value: number | null
+  mean: number | null
+  median: number | null
+  std: number | null
+  count: number
+}
+
 interface DiurnalTableRow extends Record<string, unknown> {
   metricKey: string
   metricLabel: string
@@ -106,14 +126,8 @@ interface DiurnalTableRow extends Record<string, unknown> {
   minMean: number | null
   maxMean: number | null
   peakHour: number | null
+  lowHour: number | null
   sampleTotal: number
-}
-
-interface CorrelationTableRow extends Record<string, unknown> {
-  pair: string
-  rowLabel: string
-  colLabel: string
-  correlation: number | null
 }
 
 interface SeasonalPointRow extends Record<string, unknown> {
@@ -162,39 +176,6 @@ function pickHeatToken(value: number | null, min: number, max: number): string |
   return HEAT_TOKENS[index]
 }
 
-function correlationCellStyle(r: number | null): {
-  backgroundColor?: string
-  label: string
-} {
-  if (!isFiniteNum(r)) {
-    return { label: "—" }
-  }
-  const clamped = Math.max(-1, Math.min(1, r))
-  const mixPct = Math.round(Math.abs(clamped) * 34)
-  const targetVar = clamped >= 0 ? "var(--shap-pos)" : "var(--shap-neg)"
-  return {
-    backgroundColor: `color-mix(in srgb, ${targetVar} ${mixPct}%, var(--corr-neutral))`,
-    label: clamped.toFixed(2),
-  }
-}
-
-function formatHighlightPairLabel(
-  key: string,
-  metricSpecs?: MetricSpecsMap | null,
-  distributions?: Record<string, EdaDistributionEntry>
-): string {
-  const separators = ["__vs__", "_vs_", "::", "|", ","]
-  for (const sep of separators) {
-    if (key.includes(sep)) {
-      const parts = key.split(sep).map((p) => p.trim()).filter(Boolean)
-      return parts
-        .map((p) => resolveMetricLabel(p, metricSpecs, distributions))
-        .join(" and ")
-    }
-  }
-  return humanizeIdentifier(key)
-}
-
 function humanizeAuditSource(source: string | undefined): string {
   if (!source) return "Unavailable"
   if (source === "provided") return "Recorded by pipeline"
@@ -218,10 +199,14 @@ export function EdaTab({
   refreshNonce = 0,
   onShellRefresh,
 }: EdaTabProps) {
-  const [selectedDistKey, setSelectedDistKey] = useState<string>("")
+  const [activeSubTab, setActiveSubTab] = useState<EdaSubTab>("patterns")
+  const [selectedMetricKey, setSelectedMetricKey] = useState<string>("")
   const [diurnalMode, setDiurnalMode] = useState<DiurnalAggregateMode>("mean")
+  const [diurnalDisplay, setDiurnalDisplay] =
+    useState<DiurnalDisplayMode>("curve")
   const [selectedDecompKey, setSelectedDecompKey] = useState<string>("")
   const [decompView, setDecompView] = useState<DecompositionViewMode>("cycle")
+  const [showMissingTable, setShowMissingTable] = useState<boolean>(false)
   const [localRetryNonce, setLocalRetryNonce] = useState<number>(0)
 
   const [data, setData] = useState<EdaSummaryResponse | null>(null)
@@ -288,7 +273,6 @@ export function EdaTab({
   const distributionKeys = useMemo(() => {
     const keys = Object.keys(distributions)
     const ordered = orderMetricKeys(keys, coreMetricGroupsHint)
-    // Put available distributions before missing/all_missing ones for smooth scanning.
     return [...ordered].sort((a, b) => {
       const aAvail = distributions[a]?.status === "available" ? 0 : 1
       const bAvail = distributions[b]?.status === "available" ? 0 : 1
@@ -296,22 +280,47 @@ export function EdaTab({
     })
   }, [distributions, coreMetricGroupsHint])
 
-  const activeDistKey = useMemo(() => {
-    if (selectedDistKey && selectedDistKey in distributions) {
-      return selectedDistKey
+  const diurnalMetricKeys = useMemo(() => {
+    const keys = Object.keys(data?.diurnal_heatmap?.metrics ?? {})
+    return orderMetricKeys(keys, coreMetricGroupsHint)
+  }, [data?.diurnal_heatmap?.metrics, coreMetricGroupsHint])
+
+  const allPatternMetricKeys = useMemo(() => {
+    const merged = Array.from(new Set([...distributionKeys, ...diurnalMetricKeys]))
+    return orderMetricKeys(merged, coreMetricGroupsHint)
+  }, [distributionKeys, diurnalMetricKeys, coreMetricGroupsHint])
+
+  const activeMetricKey = useMemo(() => {
+    if (selectedMetricKey && allPatternMetricKeys.includes(selectedMetricKey)) {
+      return selectedMetricKey
     }
-    const available = distributionKeys.filter(
-      (key) => distributions[key]?.status === "available"
+    const available = allPatternMetricKeys.filter(
+      (key) =>
+        distributions[key]?.status === "available" ||
+        diurnalMetricKeys.includes(key)
     )
     if (available.includes("temperature_2m")) return "temperature_2m"
     if (available.includes("us_aqi")) return "us_aqi"
-    return available[0] ?? distributionKeys[0] ?? ""
-  }, [selectedDistKey, distributions, distributionKeys])
+    return available[0] ?? allPatternMetricKeys[0] ?? ""
+  }, [selectedMetricKey, allPatternMetricKeys, distributions, diurnalMetricKeys])
 
-  const activeDist: EdaDistributionEntry | null = activeDistKey
-    ? (distributions[activeDistKey] ?? null)
+  const activeDist: EdaDistributionEntry | null = activeMetricKey
+    ? (distributions[activeMetricKey] ?? null)
     : null
-  const activeDistUnit = activeDist?.unit ?? ""
+  const activeDistUnit =
+    activeDist?.unit ?? metricSpecsHint?.[activeMetricKey]?.unit ?? ""
+  const activeMetricLabel = resolveMetricLabel(
+    activeMetricKey,
+    metricSpecsHint,
+    distributions
+  )
+
+  const activeMetricColor = useMemo(() => {
+    if (!activeMetricKey) return "var(--primary)"
+    return metricSpecsHint?.[activeMetricKey]?.chart_token
+      ? getMetricColorVar(activeMetricKey, metricSpecsHint)
+      : "var(--primary)"
+  }, [activeMetricKey, metricSpecsHint])
 
   const histogramRows = useMemo<HistogramChartRow[]>(() => {
     if (!activeDist || activeDist.status !== "available") return []
@@ -324,13 +333,6 @@ export function EdaTab({
         count: isFiniteNum(bin.count) ? bin.count : 0,
       }))
   }, [activeDist])
-
-  const distChartColor = useMemo(() => {
-    if (!activeDistKey) return "var(--primary)"
-    return metricSpecsHint?.[activeDistKey]?.chart_token
-      ? getMetricColorVar(activeDistKey, metricSpecsHint)
-      : "var(--primary)"
-  }, [activeDistKey, metricSpecsHint])
 
   const histogramTableColumns = useMemo<ChartTableColumn<HistogramChartRow>[]>(
     () => [
@@ -348,7 +350,7 @@ export function EdaTab({
     [activeDistUnit]
   )
 
-  // Diurnal heatmap data
+  // Diurnal data
   const diurnalHours = useMemo(() => {
     const raw = data?.diurnal_heatmap?.hours ?? []
     if (raw.length > 0) {
@@ -356,11 +358,6 @@ export function EdaTab({
     }
     return Array.from({ length: 24 }, (_, idx) => idx)
   }, [data?.diurnal_heatmap?.hours])
-
-  const diurnalMetricKeys = useMemo(() => {
-    const keys = Object.keys(data?.diurnal_heatmap?.metrics ?? {})
-    return orderMetricKeys(keys, coreMetricGroupsHint)
-  }, [data?.diurnal_heatmap?.metrics, coreMetricGroupsHint])
 
   const diurnalRows = useMemo(() => {
     const metricsMap = data?.diurnal_heatmap?.metrics ?? {}
@@ -373,7 +370,9 @@ export function EdaTab({
 
       const values: number[] = []
       let peakHour: number | null = null
+      let lowHour: number | null = null
       let peakVal = -Infinity
+      let lowVal = Infinity
       let sampleTotal = 0
 
       for (const hour of diurnalHours) {
@@ -386,6 +385,10 @@ export function EdaTab({
           if (v > peakVal) {
             peakVal = v
             peakHour = hour
+          }
+          if (v < lowVal) {
+            lowVal = v
+            lowHour = hour
           }
         }
       }
@@ -404,6 +407,7 @@ export function EdaTab({
         minVal,
         maxVal,
         peakHour,
+        lowHour,
         sampleTotal,
       }
     })
@@ -416,6 +420,37 @@ export function EdaTab({
     distributions,
   ])
 
+  const activeDiurnalRow = useMemo(() => {
+    const match = diurnalRows.find((r) => r.metricKey === activeMetricKey)
+    return match ?? diurnalRows[0] ?? null
+  }, [diurnalRows, activeMetricKey])
+
+  const diurnalCurveRows = useMemo<DiurnalCurveRow[]>(() => {
+    if (!activeDiurnalRow) return []
+    return diurnalHours.map((hour) => {
+      const b = activeDiurnalRow.byHour.get(hour)
+      const val = b
+        ? diurnalMode === "median"
+          ? b.median
+          : b.mean
+        : null
+      return {
+        hour,
+        hourLabel: formatHourShort(hour),
+        value: b && b.count > 0 && isFiniteNum(val) ? val : null,
+        mean: b && isFiniteNum(b.mean) ? b.mean : null,
+        median: b && isFiniteNum(b.median) ? b.median : null,
+        std: b && isFiniteNum(b.std) ? b.std : null,
+        count: b && isFiniteNum(b.count) ? b.count : 0,
+      }
+    })
+  }, [activeDiurnalRow, diurnalHours, diurnalMode])
+
+  const [diurnalCurveMin, diurnalCurveMax] = useMemo(
+    () => computeChartDomain(diurnalCurveRows.map((r) => r.value)),
+    [diurnalCurveRows]
+  )
+
   const diurnalTableRows = useMemo<DiurnalTableRow[]>(
     () =>
       diurnalRows.map((row) => ({
@@ -425,6 +460,7 @@ export function EdaTab({
         minMean: row.minVal,
         maxMean: row.maxVal,
         peakHour: row.peakHour,
+        lowHour: row.lowHour,
         sampleTotal: row.sampleTotal,
       })),
     [diurnalRows]
@@ -434,25 +470,22 @@ export function EdaTab({
     () => [
       { key: "metricLabel", header: "Metric" },
       {
-        key: "minMean",
-        header: `Min ${diurnalMode}`,
+        key: "lowHour",
+        header: `Lowest (${tzShortLabel})`,
         align: "right",
         render: (row) =>
-          `${formatMetricValue(row.minMean, 1)}${row.unit ? ` ${row.unit}` : ""}`,
-      },
-      {
-        key: "maxMean",
-        header: `Max ${diurnalMode}`,
-        align: "right",
-        render: (row) =>
-          `${formatMetricValue(row.maxMean, 1)}${row.unit ? ` ${row.unit}` : ""}`,
+          row.lowHour !== null
+            ? `${formatHourPadded(row.lowHour)} (${formatMetricValue(row.minMean, 1)})`
+            : "—",
       },
       {
         key: "peakHour",
-        header: `Peak hour (${tzShortLabel})`,
+        header: `Peak (${tzShortLabel})`,
         align: "right",
         render: (row) =>
-          row.peakHour !== null ? formatHourPadded(row.peakHour) : "—",
+          row.peakHour !== null
+            ? `${formatHourPadded(row.peakHour)} (${formatMetricValue(row.maxMean, 1)})`
+            : "—",
       },
       {
         key: "sampleTotal",
@@ -461,10 +494,10 @@ export function EdaTab({
         render: (row) => row.sampleTotal.toLocaleString(),
       },
     ],
-    [diurnalMode, tzShortLabel]
+    [tzShortLabel]
   )
 
-  // Correlation matrix data
+  // Correlations data for Key Findings + Tab 2
   const corrColumns = useMemo(
     () => data?.correlation_matrix?.columns ?? [],
     [data?.correlation_matrix?.columns]
@@ -473,48 +506,26 @@ export function EdaTab({
     () => data?.correlation_matrix?.matrix ?? {},
     [data?.correlation_matrix?.matrix]
   )
-  const corrHighlights = useMemo(() => {
-    return Object.entries(data?.correlation_matrix?.highlights ?? {})
-      .filter(([, val]) => isFiniteNum(val))
-      .sort((a, b) => Math.abs(b[1] ?? 0) - Math.abs(a[1] ?? 0))
-  }, [data?.correlation_matrix?.highlights])
 
-  const corrTableRows = useMemo<CorrelationTableRow[]>(() => {
-    const rows: CorrelationTableRow[] = []
+  const strongestCorrPair = useMemo(() => {
+    let best: { a: string; b: string; r: number } | null = null
     for (let i = 0; i < corrColumns.length; i++) {
       for (let j = i + 1; j < corrColumns.length; j++) {
         const rKey = corrColumns[i]
         const cKey = corrColumns[j]
-        const val = corrMatrix?.[rKey]?.[cKey] ?? null
-        const rowLabel = resolveMetricLabel(rKey, metricSpecsHint, distributions)
-        const colLabel = resolveMetricLabel(cKey, metricSpecsHint, distributions)
-        rows.push({
-          pair: `${rowLabel} × ${colLabel}`,
-          rowLabel,
-          colLabel,
-          correlation: isFiniteNum(val) ? val : null,
-        })
+        const val = corrMatrix?.[rKey]?.[cKey]
+        if (!isFiniteNum(val)) continue
+        if (!best || Math.abs(val) > Math.abs(best.r)) {
+          best = {
+            a: resolveMetricLabel(rKey, metricSpecsHint, distributions),
+            b: resolveMetricLabel(cKey, metricSpecsHint, distributions),
+            r: val,
+          }
+        }
       }
     }
-    return rows.sort(
-      (a, b) => Math.abs(b.correlation ?? 0) - Math.abs(a.correlation ?? 0)
-    )
+    return best
   }, [corrColumns, corrMatrix, metricSpecsHint, distributions])
-
-  const corrTableColumns = useMemo<ChartTableColumn<CorrelationTableRow>[]>(
-    () => [
-      { key: "rowLabel", header: "Feature A" },
-      { key: "colLabel", header: "Feature B" },
-      {
-        key: "correlation",
-        header: `${humanizeIdentifier(data?.correlation_matrix?.method ?? "pearson")} r`,
-        align: "right",
-        render: (row) =>
-          isFiniteNum(row.correlation) ? row.correlation.toFixed(3) : "—",
-      },
-    ],
-    [data?.correlation_matrix?.method]
-  )
 
   // Seasonal decomposition data
   const seasonalMap = useMemo(
@@ -627,7 +638,7 @@ export function EdaTab({
       },
       {
         key: "seasonal",
-        header: `Seasonal effect${activeDecompUnit ? ` (${activeDecompUnit})` : ""}`,
+        header: `Daily rhythm${activeDecompUnit ? ` (${activeDecompUnit})` : ""}`,
         align: "right",
         render: (row) =>
           isFiniteNum(row.seasonal)
@@ -667,13 +678,13 @@ export function EdaTab({
       },
       {
         key: "seasonal",
-        header: "Seasonal",
+        header: "Daily rhythm",
         align: "right",
         render: (row) => formatMetricValue(row.seasonal, 2),
       },
       {
         key: "resid",
-        header: "Residual",
+        header: "Unusual spike",
         align: "right",
         render: (row) => formatMetricValue(row.resid, 2),
       },
@@ -681,7 +692,7 @@ export function EdaTab({
     [resolvedTimeZone]
   )
 
-  // Imputation audit data (supports both EDA summary shape and pipeline_runs ImputationAuditReport fallback shape)
+  // Imputation audit normalization
   const audit = data?.imputation_audit
   const auditNormalized = useMemo(() => {
     if (!audit) {
@@ -690,7 +701,7 @@ export function EdaTab({
         sourceLabel: "Unavailable",
         totalRows: null as number | null,
         imputedRows: null as number | null,
-        tierTracked: false,
+        observedPct: null as number | null,
         tierEntries: [] as Array<{
           tier: string
           label: string
@@ -723,7 +734,7 @@ export function EdaTab({
         sourceLabel: humanizeAuditSource(audit.source),
         totalRows: null,
         imputedRows: null,
-        tierTracked: false,
+        observedPct: null,
         tierEntries: [],
         missingEntries: [],
       }
@@ -736,11 +747,16 @@ export function EdaTab({
         ? raw.rows_imputed
         : null
 
+    const observedPct =
+      totalRows && totalRows > 0 && imputedRows !== null
+        ? Math.max(0, Math.min(100, ((totalRows - imputedRows) / totalRows) * 100))
+        : null
+
     const tierLabelMap: Record<string, string> = {
-      none: "Observed (no gap)",
-      tier1_linear: "Tier 1: Linear interpolation (<=3h)",
-      tier2_diurnal_median: "Tier 2: Diurnal median (4-24h)",
-      tier3_climatology_ffill: "Tier 3: Climatology fallback (>24h)",
+      none: "Direct sensor observation",
+      tier1_linear: "Short gap fill (≤3h linear)",
+      tier2_diurnal_median: "Medium gap fill (4–24h daily median)",
+      tier3_climatology_ffill: "Long gap fill (>24h baseline)",
     }
 
     let rawTiers: Array<[string, number]> = []
@@ -828,21 +844,27 @@ export function EdaTab({
         : "Recorded by pipeline",
       totalRows,
       imputedRows,
-      tierTracked: Boolean(audit.imputation_tier_present ?? tierEntries.length > 0),
+      observedPct,
       tierEntries,
       missingEntries,
     }
   }, [audit, metricSpecsHint, distributions])
 
+  // Highlight diurnal row for Key Findings strip
+  const headlineDiurnalRow = useMemo(() => {
+    const temp = diurnalRows.find((r) => r.metricKey === "temperature_2m")
+    return temp ?? diurnalRows[0] ?? null
+  }, [diurnalRows])
+
   if (isLoading && !data) {
     return (
       <div className="flex flex-col gap-6">
-        <div className="h-20 animate-pulse rounded-xl border border-border bg-muted" />
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <div className="h-[360px] animate-pulse rounded-xl border border-border bg-muted" />
-          <div className="h-[360px] animate-pulse rounded-xl border border-border bg-muted" />
-          <div className="h-[360px] animate-pulse rounded-xl border border-border bg-muted xl:col-span-2" />
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="h-24 animate-pulse rounded-xl border border-border bg-muted" />
+          <div className="h-24 animate-pulse rounded-xl border border-border bg-muted" />
+          <div className="h-24 animate-pulse rounded-xl border border-border bg-muted" />
         </div>
+        <div className="h-[340px] animate-pulse rounded-xl border border-border bg-muted" />
       </div>
     )
   }
@@ -875,10 +897,17 @@ export function EdaTab({
   }
 
   const totalSamples = data.metadata?.sample_count ?? data.sample_count ?? 0
+  const quickMetricPills = allPatternMetricKeys.slice(0, 6)
+  const decompExplainer =
+    decompView === "cycle"
+      ? "Repeating 24-hour push above or below the daily average."
+      : decompView === "trend"
+        ? "Smoothed multi-day warming or cooling drift with daily cycles removed."
+        : "Unexpected residual spikes not explained by the daily rhythm or multi-day trend."
 
   return (
     <div className="flex flex-col gap-6 md:gap-8">
-      {/* Header + Dataset metadata bar */}
+      {/* Header */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
@@ -886,8 +915,8 @@ export function EdaTab({
               Exploratory data analysis
             </h2>
             <p className="mt-1 max-w-[68ch] text-sm/5 text-muted-foreground">
-              Historical distributions, {tzShortLabel} diurnal cycles, feature
-              correlations, seasonal decomposition, and imputation coverage.
+              Key patterns, daily weather rhythms, variable relationships, and
+              dataset health across historical observations.
             </p>
           </div>
           {isFetching ? (
@@ -897,57 +926,177 @@ export function EdaTab({
           ) : null}
         </div>
 
-        <dl className="grid grid-cols-2 gap-3 rounded-xl border border-border bg-card p-4 shadow-(--shadow-card) md:grid-cols-4">
-          <div>
-            <dt className="text-xs text-muted-foreground">Observations</dt>
-            <dd className="mt-0.5 font-display text-h2 font-semibold text-foreground tabular-nums">
-              {totalSamples.toLocaleString()}
-            </dd>
+        {/* Auto-Insights Key Findings Strip */}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {/* Card 1: Dataset coverage & health */}
+          <div className="flex flex-col justify-between gap-2 rounded-xl border border-border bg-card p-4 shadow-(--shadow-card)">
+            <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <Database className="size-3.5 text-primary" strokeWidth={1.75} />
+                Dataset health
+              </span>
+              {auditNormalized.observedPct !== null ? (
+                <Badge variant="secondary" className="h-5 px-2 text-[11px] tabular-nums">
+                  {auditNormalized.observedPct.toFixed(1)}% direct
+                </Badge>
+              ) : null}
+            </div>
+            <div>
+              <p className="font-display text-h2 font-semibold text-foreground tabular-nums">
+                {totalSamples.toLocaleString()} hours
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {data.date_range_start || data.metadata?.date_range_start ? (
+                  <span className="inline-flex flex-wrap items-center gap-1">
+                    <TimestampPkt
+                      timestamp={
+                        data.date_range_start ?? data.metadata?.date_range_start
+                      }
+                      timeZone={resolvedTimeZone}
+                      mode="datetime"
+                      showZone={false}
+                    />
+                    <span>to</span>
+                    <TimestampPkt
+                      timestamp={
+                        data.date_range_end ?? data.metadata?.date_range_end
+                      }
+                      timeZone={resolvedTimeZone}
+                      mode="datetime"
+                      showZone={false}
+                    />
+                  </span>
+                ) : (
+                  "Historical observation window"
+                )}
+              </p>
+            </div>
           </div>
-          <div>
-            <dt className="text-xs text-muted-foreground">Date range</dt>
-            <dd className="mt-1 text-xs font-medium text-foreground">
-              {data.date_range_start || data.metadata?.date_range_start ? (
-                <span className="inline-flex flex-wrap items-center gap-1">
-                  <TimestampPkt
-                    timestamp={
-                      data.date_range_start ?? data.metadata?.date_range_start
-                    }
-                    timeZone={resolvedTimeZone}
-                    mode="datetime"
-                    showZone={false}
-                  />
-                  <span>to</span>
-                  <TimestampPkt
-                    timestamp={
-                      data.date_range_end ?? data.metadata?.date_range_end
-                    }
-                    timeZone={resolvedTimeZone}
-                    mode="datetime"
-                  />
-                </span>
-              ) : (
-                "—"
-              )}
-            </dd>
+
+          {/* Card 2: Daily rhythm highlight */}
+          <div className="flex flex-col justify-between gap-2 rounded-xl border border-border bg-card p-4 shadow-(--shadow-card)">
+            <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <Clock className="size-3.5 text-primary" strokeWidth={1.75} />
+                Daily rhythm ({tzShortLabel})
+              </span>
+              {headlineDiurnalRow?.peakHour !== null &&
+              headlineDiurnalRow?.peakHour !== undefined ? (
+                <Badge variant="secondary" className="h-5 px-2 text-[11px] tabular-nums">
+                  Peak {formatHourPadded(headlineDiurnalRow.peakHour)}
+                </Badge>
+              ) : null}
+            </div>
+            {headlineDiurnalRow &&
+            headlineDiurnalRow.minVal !== null &&
+            headlineDiurnalRow.maxVal !== null ? (
+              <div>
+                <p className="font-display text-h2 font-semibold text-foreground tabular-nums">
+                  {(headlineDiurnalRow.maxVal - headlineDiurnalRow.minVal).toFixed(1)}
+                  {headlineDiurnalRow.unit ? ` ${headlineDiurnalRow.unit}` : ""}{" "}
+                  swing
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {headlineDiurnalRow.metricLabel} is typically lowest at{" "}
+                  {headlineDiurnalRow.lowHour !== null
+                    ? formatHourPadded(headlineDiurnalRow.lowHour)
+                    : "—"}{" "}
+                  and highest at{" "}
+                  {headlineDiurnalRow.peakHour !== null
+                    ? formatHourPadded(headlineDiurnalRow.peakHour)
+                    : "—"}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Hourly diurnal cycles will summarize once multi-day data is recorded.
+              </p>
+            )}
           </div>
-          <div>
-            <dt className="text-xs text-muted-foreground">Seasonal period</dt>
-            <dd className="mt-1 text-sm font-semibold text-foreground tabular-nums">
-              {data.metadata?.seasonal_period ?? 24} hours
-            </dd>
+
+          {/* Card 3: Strongest relationship */}
+          <div className="flex flex-col justify-between gap-2 rounded-xl border border-border bg-card p-4 shadow-(--shadow-card)">
+            <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <GitCompareArrows
+                  className="size-3.5 text-primary"
+                  strokeWidth={1.75}
+                />
+                Strongest link
+              </span>
+              {strongestCorrPair ? (
+                <Badge variant="secondary" className="h-5 px-2 text-[11px] tabular-nums">
+                  r = {strongestCorrPair.r > 0 ? "+" : ""}
+                  {strongestCorrPair.r.toFixed(2)}
+                </Badge>
+              ) : null}
+            </div>
+            {strongestCorrPair ? (
+              <div>
+                <p className="truncate font-display text-h2 font-semibold text-foreground">
+                  {strongestCorrPair.a} &amp; {strongestCorrPair.b}
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {strongestCorrPair.r >= 0
+                    ? "Tend to rise and fall together"
+                    : "Tend to move in opposite directions"}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Pairwise variable relationships appear once enough paired hours exist.
+              </p>
+            )}
           </div>
-          <div>
-            <dt className="text-xs text-muted-foreground">Last computed</dt>
-            <dd className="mt-1 text-xs font-medium text-foreground">
+        </div>
+
+        {/* Clean 3-Section Sub-Tab Switcher */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+          <div
+            role="tablist"
+            aria-label="EDA sections"
+            className="inline-flex flex-wrap items-center gap-1 rounded-full bg-muted p-1"
+          >
+            {(
+              [
+                { id: "patterns", label: "Daily patterns & spread" },
+                { id: "relationships", label: "Variable relationships" },
+                { id: "trends", label: "Trends & data quality" },
+              ] as const
+            ).map((tab) => {
+              const active = activeSubTab === tab.id
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setActiveSubTab(tab.id)}
+                  className={cn(
+                    "inline-flex h-8 items-center rounded-full px-3.5 text-xs font-medium transition-colors duration-120",
+                    active
+                      ? "bg-card text-foreground shadow-(--shadow-card)"
+                      : "text-foreground/75 hover:text-foreground"
+                  )}
+                >
+                  {tab.label}
+                </button>
+              )
+            })}
+          </div>
+
+          {data.computed_at_utc ? (
+            <span className="text-xs text-muted-foreground">
+              Last computed{" "}
               <TimestampPkt
                 timestamp={data.computed_at_utc}
                 timeZone={resolvedTimeZone}
                 mode="datetime"
+                className="font-medium text-foreground"
               />
-            </dd>
-          </div>
-        </dl>
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {errorMessage ? (
@@ -959,552 +1108,61 @@ export function EdaTab({
         />
       ) : null}
 
-      {/* 2-Column Grid of EDA Chart Cards */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {/* Card 1: Distributions */}
-        <ChartCard
-          title="Variable distributions"
-          subtitle={
-            activeDist
-              ? `${activeDist.label}${activeDist.unit ? ` (${activeDist.unit})` : ""} histogram and empirical quantiles`
-              : "Histogram and summary quantiles across observed metrics"
-          }
-          ariaLabel="Feature distribution histogram"
-          controls={
-            distributionKeys.length > 0 ? (
-              <Select value={activeDistKey} onValueChange={setSelectedDistKey}>
-                <SelectTrigger
-                  aria-label="Select distribution metric"
-                  className="h-8 min-w-[168px] bg-card text-xs"
-                >
-                  <SelectValue placeholder="Select variable" />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  {distributionKeys.map((key) => {
-                    const entry = distributions[key]
-                    const unavail = entry?.status !== "available"
-                    return (
-                      <SelectItem key={key} value={key}>
-                        {entry?.label ?? resolveMetricLabel(key, metricSpecsHint)}
-                        {unavail ? " (unavailable)" : ""}
-                      </SelectItem>
-                    )
-                  })}
-                </SelectContent>
-              </Select>
-            ) : undefined
-          }
-          subHeader={
-            activeDist && activeDist.status === "available" ? (
-              <dl className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Mean / Std</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDist.mean, 1)} /{" "}
-                    {formatMetricValue(activeDist.std, 1)}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Min / Max</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDist.min, 1)} /{" "}
-                    {formatMetricValue(activeDist.max, 1)}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">P05 / P50 / P95</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDist.q05, 1)} /{" "}
-                    {formatMetricValue(activeDist.q50, 1)} /{" "}
-                    {formatMetricValue(activeDist.q95, 1)}
-                  </dd>
-                </div>
-                <div className="col-span-3 rounded-lg bg-muted px-3 py-2 sm:col-span-1">
-                  <dt className="text-xs text-foreground/75">Valid / Missing</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {activeDist.valid_count.toLocaleString()} /{" "}
-                    {activeDist.missing_count.toLocaleString()}
-                  </dd>
-                </div>
-              </dl>
-            ) : undefined
-          }
-          tableColumns={histogramTableColumns}
-          tableRows={histogramRows}
-          emptyTableMessage="No histogram bins available for the selected metric."
-          footer={
-            activeDist && isFiniteNum(activeDist.circular_mean_deg) ? (
-              <span className="tabular-nums">
-                Circular mean direction:{" "}
-                <span className="font-medium text-foreground">
-                  {activeDist.circular_mean_deg.toFixed(1)}°
-                </span>
-              </span>
-            ) : undefined
-          }
-        >
-          {!activeDist ? (
-            <EmptyState
-              icon={Grid2x2}
-              title="Distributions unavailable"
-              description="Summary distributions will appear once the EDA pipeline computes feature statistics."
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : activeDist.status !== "available" ? (
-            <div className="flex items-start gap-3 rounded-lg bg-muted p-4 text-sm text-foreground">
-              <AlertCircle
-                className="mt-0.5 size-5 shrink-0 text-alert-warning"
-                strokeWidth={1.75}
-              />
-              <div>
-                <p className="font-semibold">
-                  {activeDist.label} distribution unavailable (
-                  {humanizeIdentifier(activeDist.status)})
-                </p>
-                <p className="mt-1 text-xs text-foreground/80 tabular-nums">
-                  Valid rows: {activeDist.valid_count.toLocaleString()}, missing
-                  rows: {activeDist.missing_count.toLocaleString()}
-                </p>
-              </div>
-            </div>
-          ) : histogramRows.length === 0 ? (
-            <EmptyState
-              icon={Grid2x2}
-              title="No histogram bins recorded"
-              description={`Valid observations (${activeDist.valid_count}) did not produce histogram bins for ${activeDist.label}.`}
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : (
-            <ChartContainer
-              config={{
-                count: { label: "Observations", color: distChartColor },
-              }}
-              className="h-[240px] w-full aspect-auto md:h-[260px]"
-            >
-              <BarChart
-                data={histogramRows}
-                margin={{ top: 8, right: 12, bottom: 4, left: 0 }}
+      {/* ================================================================= */}
+      {/* TAB 1: DAILY PATTERNS & SPREAD                                    */}
+      {/* ================================================================= */}
+      {activeSubTab === "patterns" ? (
+        <div className="flex flex-col gap-6">
+          {/* Shared Metric Selector driving both cards */}
+          {allPatternMetricKeys.length > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div
+                role="tablist"
+                aria-label="Quick variable selector"
+                className="flex flex-wrap items-center gap-1.5"
               >
-                <CartesianGrid vertical={false} stroke="var(--border)" />
-                <XAxis
-                  dataKey="label"
-                  tickLine={false}
-                  axisLine={false}
-                  tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                  minTickGap={22}
-                />
-                <YAxis
-                  tickFormatter={formatAxisTick}
-                  tickLine={false}
-                  axisLine={false}
-                  width={44}
-                  tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                />
-                <ChartTooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null
-                    const row = payload[0]?.payload as
-                      | HistogramChartRow
-                      | undefined
-                    if (!row) return null
-                    const share =
-                      activeDist.valid_count > 0
-                        ? ((row.count / activeDist.valid_count) * 100).toFixed(1)
-                        : null
-                    return (
-                      <SkyCastChartTooltipCard
-                        rows={[
-                          {
-                            key: "bin",
-                            label: `${row.label}${activeDist.unit ? ` ${activeDist.unit}` : ""}`,
-                            valueText: `${row.count.toLocaleString()} rows`,
-                            color: distChartColor,
-                          },
-                        ]}
-                        footerNote={
-                          share !== null ? `${share}% of valid observations` : null
-                        }
-                      />
-                    )
-                  }}
-                />
-                <Bar
-                  dataKey="count"
-                  fill={distChartColor}
-                  radius={[4, 4, 0, 0]}
-                  isAnimationActive={false}
-                />
-              </BarChart>
-            </ChartContainer>
-          )}
-        </ChartCard>
-
-        {/* Card 2: 24h PKT Diurnal Heatmap */}
-        <ChartCard
-          title={`24-hour diurnal cycle (${tzShortLabel})`}
-          subtitle="Hourly variation normalized per metric row from low (pale) to peak (deep sky)"
-          ariaLabel="24-hour diurnal cycle heatmap"
-          controls={
-            <div
-              role="group"
-              aria-label="Diurnal aggregation statistic"
-              className="inline-flex h-8 items-center rounded-md bg-muted p-0.5"
-            >
-              {(["mean", "median"] as const).map((mode) => {
-                const active = diurnalMode === mode
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => setDiurnalMode(mode)}
-                    className={cn(
-                      "inline-flex h-7 items-center rounded-sm px-2.5 text-xs font-medium capitalize transition-colors duration-120",
-                      active
-                        ? "bg-card text-foreground shadow-(--shadow-card)"
-                        : "text-foreground/75 hover:text-foreground"
-                    )}
-                  >
-                    {mode}
-                  </button>
-                )
-              })}
-            </div>
-          }
-          tableColumns={diurnalTableColumns}
-          tableRows={diurnalTableRows}
-          emptyTableMessage="No diurnal buckets recorded."
-          footer={
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>Cells normalized within each variable row</span>
-              <div className="flex items-center gap-1.5">
-                <span>Low</span>
-                {HEAT_TOKENS.map((token, idx) => (
-                  <span
-                    key={idx}
-                    className="size-3 rounded-xs border border-border"
-                    style={{ backgroundColor: token }}
-                    aria-hidden="true"
-                  />
-                ))}
-                <span>High</span>
-              </div>
-            </div>
-          }
-        >
-          {diurnalRows.length === 0 ? (
-            <EmptyState
-              icon={Grid2x2}
-              title="Diurnal heatmap unavailable"
-              description="Hourly diurnal profiles appear once multi-day local timestamp buckets are computed."
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : (
-            <div className="overflow-x-auto pb-1">
-              <div className="inline-block min-w-full align-middle">
-                {/* Hour header row */}
-                <div className="flex items-center gap-1 pb-1.5">
-                  <div className="sticky left-0 z-10 w-[124px] shrink-0 bg-card pr-2 text-xs font-medium text-muted-foreground sm:w-[144px]">
-                    Metric ({tzShortLabel})
-                  </div>
-                  <div className="flex items-center gap-1">
-                    {diurnalHours.map((hour) => (
-                      <div
-                        key={hour}
-                        className="w-5 shrink-0 text-center text-[11px] text-muted-foreground tabular-nums sm:w-7"
-                      >
-                        {formatHourShort(hour)}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Metric heatmap rows */}
-                <div className="flex flex-col gap-1">
-                  {diurnalRows.map((row) => (
-                    <div
-                      key={row.metricKey}
-                      className="flex items-center gap-1"
+                {quickMetricPills.map((key) => {
+                  const active = key === activeMetricKey
+                  const label = resolveMetricLabel(
+                    key,
+                    metricSpecsHint,
+                    distributions
+                  )
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setSelectedMetricKey(key)}
+                      className={cn(
+                        "inline-flex h-8 items-center rounded-full border px-3 text-xs font-medium transition-colors duration-120",
+                        active
+                          ? "border-primary/50 bg-accent text-accent-foreground"
+                          : "border-border bg-card text-muted-foreground hover:text-foreground"
+                      )}
                     >
-                      <div
-                        className="sticky left-0 z-10 w-[124px] shrink-0 truncate bg-card pr-2 text-xs font-medium text-foreground sm:w-[144px]"
-                        title={row.metricLabel}
-                      >
-                        {row.metricLabel}
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        {diurnalHours.map((hour) => {
-                          const bucket = row.byHour.get(hour)
-                          const val = bucket
-                            ? diurnalMode === "median"
-                              ? bucket.median
-                              : bucket.mean
-                            : null
-                          const validVal =
-                            bucket && bucket.count > 0 && isFiniteNum(val)
-                              ? val
-                              : null
-                          const heatColor =
-                            validVal !== null &&
-                            row.minVal !== null &&
-                            row.maxVal !== null
-                              ? pickHeatToken(validVal, row.minVal, row.maxVal)
-                              : null
-
-                          return (
-                            <Tooltip key={hour}>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label={`${row.metricLabel} at ${formatHourPadded(hour)} ${tzShortLabel}: ${
-                                    validVal !== null
-                                      ? `${formatMetricValue(validVal, 1)} ${row.unit}`
-                                      : "no data"
-                                  }`}
-                                  className={cn(
-                                    "flex size-5 shrink-0 items-center justify-center rounded-sm border border-border/50 text-[10px] transition-transform duration-120 hover:scale-105 focus-visible:outline-2 focus-visible:outline-ring sm:size-7",
-                                    heatColor === null &&
-                                      "bg-muted text-muted-foreground"
-                                  )}
-                                  style={
-                                    heatColor
-                                      ? { backgroundColor: heatColor }
-                                      : undefined
-                                  }
-                                >
-                                  {heatColor === null ? "—" : ""}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent className="flex flex-col gap-0.5 text-left">
-                                <span className="font-semibold text-popover-foreground">
-                                  {row.metricLabel} at {formatHourPadded(hour)}{" "}
-                                  {tzShortLabel}
-                                </span>
-                                {bucket && bucket.count > 0 ? (
-                                  <>
-                                    <span className="text-muted-foreground tabular-nums">
-                                      Mean: {formatMetricValue(bucket.mean, 2)}
-                                      {row.unit ? ` ${row.unit}` : ""}
-                                    </span>
-                                    <span className="text-muted-foreground tabular-nums">
-                                      Median:{" "}
-                                      {formatMetricValue(bucket.median, 2)}
-                                      {row.unit ? ` ${row.unit}` : ""}
-                                    </span>
-                                    <span className="text-muted-foreground tabular-nums">
-                                      Std dev: {formatMetricValue(bucket.std, 2)}{" "}
-                                      ({bucket.count} samples)
-                                    </span>
-                                  </>
-                                ) : (
-                                  <span className="text-muted-foreground">
-                                    No observations in this hour bucket
-                                  </span>
-                                )}
-                              </TooltipContent>
-                            </Tooltip>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                      {label}
+                    </button>
+                  )
+                })}
               </div>
-            </div>
-          )}
-        </ChartCard>
 
-        {/* Card 3: Correlation Matrix (spans full 2 cols on xl) */}
-        <ChartCard
-          title="Feature correlation matrix"
-          subtitle={
-            corrColumns.length > 0
-              ? `${humanizeIdentifier(data.correlation_matrix?.method ?? "pearson")} correlations (min ${data.correlation_matrix?.min_periods ?? 1} paired rows)`
-              : "Pairwise statistical associations across weather and pollutant variables"
-          }
-          ariaLabel="Feature correlation matrix"
-          className="xl:col-span-2"
-          subHeader={
-            corrHighlights.length > 0 ||
-            (data.correlation_matrix?.constant_columns?.length ?? 0) > 0 ? (
-              <div className="flex flex-col gap-2">
-                {corrHighlights.length > 0 ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-medium text-muted-foreground">
-                      Notable pairs:
-                    </span>
-                    {corrHighlights.slice(0, 6).map(([pairKey, val]) => (
-                      <Badge
-                        key={pairKey}
-                        variant="secondary"
-                        className="h-6 px-2.5 text-xs tabular-nums"
-                      >
-                        {formatHighlightPairLabel(
-                          pairKey,
-                          metricSpecsHint,
-                          distributions
-                        )}
-                        :{" "}
-                        {isFiniteNum(val)
-                          ? `${val > 0 ? "+" : ""}${val.toFixed(2)}`
-                          : "—"}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : null}
-
-                {(data.correlation_matrix?.constant_columns?.length ?? 0) > 0 ? (
-                  <p className="text-xs text-muted-foreground">
-                    Constant columns excluded from pairs:{" "}
-                    {data.correlation_matrix.constant_columns
-                      .map((col) =>
-                        resolveMetricLabel(col, metricSpecsHint, distributions)
-                      )
-                      .join(", ")}
-                  </p>
-                ) : null}
-              </div>
-            ) : undefined
-          }
-          tableColumns={corrTableColumns}
-          tableRows={corrTableRows}
-          emptyTableMessage="No correlation pairs available."
-          footer={
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>
-                Orange denotes positive correlation; blue denotes inverse
-                relationship.
-              </span>
-              <span>Hover or focus any cell for exact r</span>
-            </div>
-          }
-        >
-          {corrColumns.length === 0 ? (
-            <EmptyState
-              icon={Grid2x2}
-              title="Correlation matrix unavailable"
-              description="Pairwise correlation coefficients appear once sufficient valid observations are available."
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : (
-            <div className="overflow-x-auto pb-1">
-              <div className="inline-block align-middle">
-                {/* Column headers */}
-                <div className="flex items-end gap-1 pb-1.5">
-                  <div className="sticky left-0 z-10 w-[124px] shrink-0 bg-card pr-2 text-xs font-medium text-muted-foreground sm:w-[144px]" />
-                  {corrColumns.map((colKey) => {
-                    const label = resolveMetricLabel(
-                      colKey,
-                      metricSpecsHint,
-                      distributions
-                    )
-                    return (
-                      <div
-                        key={colKey}
-                        title={label}
-                        className="w-9 shrink-0 truncate text-center text-[11px] font-medium text-muted-foreground sm:w-12"
-                      >
-                        {label}
-                      </div>
-                    )
-                  })}
-                </div>
-
-                {/* Matrix rows */}
-                <div className="flex flex-col gap-1">
-                  {corrColumns.map((rowKey) => {
-                    const rowLabel = resolveMetricLabel(
-                      rowKey,
-                      metricSpecsHint,
-                      distributions
-                    )
-                    return (
-                      <div key={rowKey} className="flex items-center gap-1">
-                        <div
-                          className="sticky left-0 z-10 w-[124px] shrink-0 truncate bg-card pr-2 text-xs font-medium text-foreground sm:w-[144px]"
-                          title={rowLabel}
-                        >
-                          {rowLabel}
-                        </div>
-
-                        {corrColumns.map((colKey) => {
-                          const rVal = corrMatrix?.[rowKey]?.[colKey] ?? null
-                          const colLabel = resolveMetricLabel(
-                            colKey,
-                            metricSpecsHint,
-                            distributions
-                          )
-                          const cell = correlationCellStyle(rVal)
-
-                          return (
-                            <Tooltip key={colKey}>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label={`${rowLabel} and ${colLabel}: correlation ${cell.label}`}
-                                  className={cn(
-                                    "flex size-9 shrink-0 items-center justify-center rounded-sm border border-border/50 text-[11px] font-medium tabular-nums focus-visible:outline-2 focus-visible:outline-ring sm:size-12 sm:text-xs",
-                                    isFiniteNum(rVal)
-                                      ? "text-foreground"
-                                      : "bg-muted text-muted-foreground"
-                                  )}
-                                  style={
-                                    cell.backgroundColor
-                                      ? { backgroundColor: cell.backgroundColor }
-                                      : undefined
-                                  }
-                                >
-                                  {cell.label}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent className="flex flex-col gap-0.5 text-left">
-                                <span className="font-semibold text-popover-foreground">
-                                  {rowLabel} × {colLabel}
-                                </span>
-                                <span className="text-muted-foreground tabular-nums">
-                                  Correlation:{" "}
-                                  {isFiniteNum(rVal) ? rVal.toFixed(4) : "N/A"}
-                                </span>
-                              </TooltipContent>
-                            </Tooltip>
-                          )
-                        })}
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-        </ChartCard>
-
-        {/* Card 4: Seasonal Decomposition */}
-        <ChartCard
-          title="Seasonal decomposition"
-          subtitle={
-            activeDecomp?.status === "available"
-              ? `${activeDecompLabel} decomposed into trend, ${activeDecomp.period}h seasonal cycle, and residual`
-              : `${activeDecompLabel || "Metric"} trend and diurnal seasonal separation`
-          }
-          ariaLabel="Seasonal decomposition chart"
-          controls={
-            <div className="flex flex-wrap items-center gap-2">
-              {seasonalKeys.length > 0 ? (
+              {allPatternMetricKeys.length > quickMetricPills.length ? (
                 <Select
-                  value={activeDecompKey}
-                  onValueChange={setSelectedDecompKey}
+                  value={activeMetricKey}
+                  onValueChange={setSelectedMetricKey}
                 >
                   <SelectTrigger
-                    aria-label="Select decomposition metric"
-                    className="h-8 min-w-[152px] bg-card text-xs"
+                    aria-label="Select any weather or pollutant variable"
+                    className="h-8 min-w-[180px] bg-card text-xs"
                   >
-                    <SelectValue placeholder="Metric" />
+                    <SelectValue placeholder="All variables" />
                   </SelectTrigger>
                   <SelectContent position="popper">
-                    {seasonalKeys.map((key) => {
-                      const entry = seasonalMap[key]
-                      const unavail = entry?.status !== "available"
+                    {allPatternMetricKeys.map((key) => {
+                      const entry = distributions[key]
+                      const unavail = entry && entry.status !== "available"
                       return (
                         <SelectItem key={key} value={key}>
                           {resolveMetricLabel(key, metricSpecsHint, distributions)}
@@ -1515,478 +1173,1079 @@ export function EdaTab({
                   </SelectContent>
                 </Select>
               ) : null}
+            </div>
+          ) : null}
 
-              {activeDecomp?.status === "available" ? (
-                <div
-                  role="group"
-                  aria-label="Decomposition chart view"
-                  className="inline-flex h-8 items-center rounded-md bg-muted p-0.5"
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            {/* Card 1A: 24-Hour Daily Rhythm (Smooth Curve default | All-metrics Heatmap) */}
+            <ChartCard
+              title={
+                diurnalDisplay === "curve"
+                  ? `Typical 24-hour ${activeMetricLabel.toLowerCase()} rhythm (${tzShortLabel})`
+                  : `24-hour rhythm across all metrics (${tzShortLabel})`
+              }
+              titleInfo="Shows how weather changes from midnight (00:00) through nightfall (23:00) in local time. Switch to All metrics to compare peak hours side-by-side."
+              subtitle={
+                diurnalDisplay === "curve" && activeDiurnalRow
+                  ? `Average hourly ${activeDiurnalRow.metricLabel.toLowerCase()} across historical days`
+                  : "Shaded per row from lowest hour (pale) to peak hour (deep blue)"
+              }
+              ariaLabel="24-hour daily rhythm"
+              controls={
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div
+                    role="group"
+                    aria-label="Daily rhythm display"
+                    className="inline-flex h-8 items-center rounded-md bg-muted p-0.5"
+                  >
+                    {(
+                      [
+                        { id: "curve", label: "Curve" },
+                        { id: "heatmap", label: "All metrics" },
+                      ] as const
+                    ).map((opt) => {
+                      const active = diurnalDisplay === opt.id
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => setDiurnalDisplay(opt.id)}
+                          className={cn(
+                            "inline-flex h-7 items-center rounded-sm px-2.5 text-xs font-medium transition-colors duration-120",
+                            active
+                              ? "bg-card text-foreground shadow-(--shadow-card)"
+                              : "text-foreground/75 hover:text-foreground"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div
+                    role="group"
+                    aria-label="Diurnal statistic"
+                    className="inline-flex h-8 items-center rounded-md bg-muted p-0.5"
+                  >
+                    {(["mean", "median"] as const).map((mode) => {
+                      const active = diurnalMode === mode
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => setDiurnalMode(mode)}
+                          className={cn(
+                            "inline-flex h-7 items-center rounded-sm px-2 text-xs font-medium capitalize transition-colors duration-120",
+                            active
+                              ? "bg-card text-foreground shadow-(--shadow-card)"
+                              : "text-foreground/75 hover:text-foreground"
+                          )}
+                        >
+                          {mode}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              }
+              subHeader={
+                diurnalDisplay === "curve" &&
+                activeDiurnalRow &&
+                activeDiurnalRow.minVal !== null &&
+                activeDiurnalRow.maxVal !== null ? (
+                  <dl className="grid grid-cols-2 gap-2.5">
+                    <div className="rounded-lg bg-muted px-3 py-2">
+                      <dt className="text-xs text-muted-foreground">
+                        Lowest hour ({tzShortLabel})
+                      </dt>
+                      <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                        {activeDiurnalRow.lowHour !== null
+                          ? formatHourPadded(activeDiurnalRow.lowHour)
+                          : "—"}{" "}
+                        <span className="font-normal text-muted-foreground">
+                          ({formatMetricValue(activeDiurnalRow.minVal, 1)}
+                          {activeDiurnalRow.unit ? ` ${activeDiurnalRow.unit}` : ""})
+                        </span>
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-muted px-3 py-2">
+                      <dt className="text-xs text-muted-foreground">
+                        Peak hour ({tzShortLabel})
+                      </dt>
+                      <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                        {activeDiurnalRow.peakHour !== null
+                          ? formatHourPadded(activeDiurnalRow.peakHour)
+                          : "—"}{" "}
+                        <span className="font-normal text-muted-foreground">
+                          ({formatMetricValue(activeDiurnalRow.maxVal, 1)}
+                          {activeDiurnalRow.unit ? ` ${activeDiurnalRow.unit}` : ""})
+                        </span>
+                      </dd>
+                    </div>
+                  </dl>
+                ) : undefined
+              }
+              tableColumns={diurnalTableColumns}
+              tableRows={diurnalTableRows}
+              emptyTableMessage="No diurnal buckets recorded."
+              footer={
+                diurnalDisplay === "heatmap" ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>Each row scaled independently from low to peak</span>
+                    <div className="flex items-center gap-1.5">
+                      <span>Low</span>
+                      {HEAT_TOKENS.map((token, idx) => (
+                        <span
+                          key={idx}
+                          className="size-3 rounded-xs border border-border"
+                          style={{ backgroundColor: token }}
+                          aria-hidden="true"
+                        />
+                      ))}
+                      <span>Peak</span>
+                    </div>
+                  </div>
+                ) : (
+                  <span>
+                    Hours shown in local {tzShortLabel} time · Hover any hour for exact mean and median
+                  </span>
+                )
+              }
+            >
+              {diurnalRows.length === 0 ? (
+                <EmptyState
+                  icon={Grid2x2}
+                  title="Daily rhythm unavailable"
+                  description="Hourly diurnal profiles appear once multi-day local timestamp buckets are computed."
+                  className="border-0 bg-muted shadow-none"
+                />
+              ) : diurnalDisplay === "curve" ? (
+                <ChartContainer
+                  config={{
+                    value: {
+                      label: activeDiurnalRow?.metricLabel ?? activeMetricLabel,
+                      color: activeMetricColor,
+                    },
+                  }}
+                  className="h-[240px] w-full aspect-auto md:h-[260px]"
                 >
-                  {(
-                    [
-                      { id: "cycle", label: "24h cycle" },
-                      { id: "trend", label: "Trend" },
-                      { id: "components", label: "Resid" },
-                    ] as const
-                  ).map((item) => {
-                    const active = decompView === item.id
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => setDecompView(item.id)}
-                        className={cn(
-                          "inline-flex h-7 items-center rounded-sm px-2 text-xs font-medium transition-colors duration-120",
-                          active
-                            ? "bg-card text-foreground shadow-(--shadow-card)"
-                            : "text-foreground/75 hover:text-foreground"
-                        )}
-                      >
-                        {item.label}
-                      </button>
-                    )
-                  })}
+                  <ComposedChart
+                    data={diurnalCurveRows}
+                    margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid vertical={false} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="hourLabel"
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                      minTickGap={18}
+                    />
+                    <YAxis
+                      domain={[diurnalCurveMin, diurnalCurveMax]}
+                      tickFormatter={formatAxisTick}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                    />
+                    <ChartTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null
+                        const row = payload[0]?.payload as
+                          | DiurnalCurveRow
+                          | undefined
+                        if (!row) return null
+                        const unit = activeDiurnalRow?.unit ?? ""
+                        const rows: TooltipEntryRow[] = []
+                        if (row.mean !== null) {
+                          rows.push({
+                            key: "mean",
+                            label: "Mean",
+                            valueText: `${formatMetricValue(row.mean, 1)}${unit ? ` ${unit}` : ""}`,
+                            color: activeMetricColor,
+                          })
+                        }
+                        if (row.median !== null) {
+                          rows.push({
+                            key: "median",
+                            label: "Median",
+                            valueText: `${formatMetricValue(row.median, 1)}${unit ? ` ${unit}` : ""}`,
+                            color: "var(--muted-foreground)",
+                          })
+                        }
+                        return (
+                          <SkyCastChartTooltipCard
+                            rows={rows}
+                            footerNote={`${formatHourPadded(row.hour)} ${tzShortLabel} · ${row.count} days sampled`}
+                          />
+                        )
+                      }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="value"
+                      stroke="none"
+                      fill={activeMetricColor}
+                      fillOpacity={0.14}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      stroke={activeMetricColor}
+                      strokeWidth={2.25}
+                      dot={false}
+                      activeDot={{ r: 5, strokeWidth: 2 }}
+                      connectNulls={false}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
+                </ChartContainer>
+              ) : (
+                <div className="overflow-x-auto pb-1">
+                  <div className="inline-block min-w-full align-middle">
+                    <div className="flex items-center gap-1 pb-1.5">
+                      <div className="sticky left-0 z-10 w-[120px] shrink-0 bg-card pr-2 text-xs font-medium text-muted-foreground sm:w-[136px]">
+                        Metric
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {diurnalHours.map((hour) => (
+                          <div
+                            key={hour}
+                            className="w-5 shrink-0 text-center text-[11px] text-muted-foreground tabular-nums sm:w-6"
+                          >
+                            {formatHourShort(hour)}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="w-12 shrink-0 pl-2 text-right text-[11px] font-medium text-muted-foreground">
+                        Peak
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                      {diurnalRows.map((row) => (
+                        <div
+                          key={row.metricKey}
+                          className="flex items-center gap-1"
+                        >
+                          <div
+                            className="sticky left-0 z-10 w-[120px] shrink-0 truncate bg-card pr-2 text-xs font-medium text-foreground sm:w-[136px]"
+                            title={row.metricLabel}
+                          >
+                            {row.metricLabel}
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            {diurnalHours.map((hour) => {
+                              const bucket = row.byHour.get(hour)
+                              const val = bucket
+                                ? diurnalMode === "median"
+                                  ? bucket.median
+                                  : bucket.mean
+                                : null
+                              const validVal =
+                                bucket && bucket.count > 0 && isFiniteNum(val)
+                                  ? val
+                                  : null
+                              const heatColor =
+                                validVal !== null &&
+                                row.minVal !== null &&
+                                row.maxVal !== null
+                                  ? pickHeatToken(validVal, row.minVal, row.maxVal)
+                                  : null
+
+                              return (
+                                <Tooltip key={hour}>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      aria-label={`${row.metricLabel} at ${formatHourPadded(hour)} ${tzShortLabel}: ${
+                                        validVal !== null
+                                          ? `${formatMetricValue(validVal, 1)} ${row.unit}`
+                                          : "no data"
+                                      }`}
+                                      className={cn(
+                                        "flex size-5 shrink-0 items-center justify-center rounded-xs border border-border/40 text-[10px] transition-transform duration-120 hover:scale-105 focus-visible:outline-2 focus-visible:outline-ring sm:size-6",
+                                        heatColor === null &&
+                                          "bg-muted text-muted-foreground"
+                                      )}
+                                      style={
+                                        heatColor
+                                          ? { backgroundColor: heatColor }
+                                          : undefined
+                                      }
+                                    >
+                                      {heatColor === null ? "—" : ""}
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="flex flex-col gap-0.5 text-left">
+                                    <span className="font-semibold text-popover-foreground">
+                                      {row.metricLabel} at{" "}
+                                      {formatHourPadded(hour)} {tzShortLabel}
+                                    </span>
+                                    {bucket && bucket.count > 0 ? (
+                                      <>
+                                        <span className="text-muted-foreground tabular-nums">
+                                          Mean: {formatMetricValue(bucket.mean, 2)}
+                                          {row.unit ? ` ${row.unit}` : ""}
+                                        </span>
+                                        <span className="text-muted-foreground tabular-nums">
+                                          Median:{" "}
+                                          {formatMetricValue(bucket.median, 2)}
+                                          {row.unit ? ` ${row.unit}` : ""}
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <span className="text-muted-foreground">
+                                        No observations in this hour
+                                      </span>
+                                    )}
+                                  </TooltipContent>
+                                </Tooltip>
+                              )
+                            })}
+                          </div>
+
+                          <div className="w-12 shrink-0 pl-2 text-right text-[11px] font-medium text-foreground tabular-nums">
+                            {row.peakHour !== null
+                              ? formatHourPadded(row.peakHour)
+                              : "—"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              ) : null}
-            </div>
-          }
-          subHeader={
-            activeDecomp?.status === "available" ? (
-              <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Observed mean</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDecomp.summary?.observed_mean, 2)}
-                    {activeDecompUnit ? ` ${activeDecompUnit}` : ""}
-                  </dd>
+              )}
+            </ChartCard>
+
+            {/* Card 1B: Typical Values & Spread (Histogram) */}
+            <ChartCard
+              title={`${activeMetricLabel} typical values & spread`}
+              titleInfo="Shows how often different readings occurred in the historical dataset. Taller bars mark the most common values."
+              subtitle={
+                activeDist && activeDist.status === "available"
+                  ? `Most readings fall between ${formatMetricValue(activeDist.q05, 1)} and ${formatMetricValue(activeDist.q95, 1)}${activeDistUnit ? ` ${activeDistUnit}` : ""}`
+                  : "Frequency of historical readings across value ranges"
+              }
+              ariaLabel={`${activeMetricLabel} value distribution histogram`}
+              subHeader={
+                activeDist && activeDist.status === "available" ? (
+                  <dl className="grid grid-cols-3 gap-2.5">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="rounded-lg bg-muted px-3 py-2">
+                          <dt className="text-xs text-muted-foreground">
+                            Typical
+                          </dt>
+                          <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                            {formatMetricValue(activeDist.q50, 1)}
+                            {activeDistUnit ? ` ${activeDistUnit}` : ""}
+                          </dd>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent className="text-xs tabular-nums">
+                        Median (P50): {formatMetricValue(activeDist.q50, 2)} · Mean:{" "}
+                        {formatMetricValue(activeDist.mean, 2)} · Std dev:{" "}
+                        {formatMetricValue(activeDist.std, 2)}
+                      </TooltipContent>
+                    </Tooltip>
+
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="rounded-lg bg-muted px-3 py-2">
+                          <dt className="text-xs text-muted-foreground">
+                            Usual range
+                          </dt>
+                          <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                            {formatMetricValue(activeDist.q05, 1)} –{" "}
+                            {formatMetricValue(activeDist.q95, 1)}
+                          </dd>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent className="text-xs">
+                        Middle 90% of all recorded hours (5th to 95th percentile).
+                      </TooltipContent>
+                    </Tooltip>
+
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="rounded-lg bg-muted px-3 py-2">
+                          <dt className="text-xs text-muted-foreground">
+                            Min – Max
+                          </dt>
+                          <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                            {formatMetricValue(activeDist.min, 1)} –{" "}
+                            {formatMetricValue(activeDist.max, 1)}
+                          </dd>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent className="text-xs tabular-nums">
+                        Valid: {activeDist.valid_count.toLocaleString()} · Missing:{" "}
+                        {activeDist.missing_count.toLocaleString()}
+                      </TooltipContent>
+                    </Tooltip>
+                  </dl>
+                ) : undefined
+              }
+              tableColumns={histogramTableColumns}
+              tableRows={histogramRows}
+              emptyTableMessage="No histogram bins available for the selected metric."
+              footer={
+                activeDist && isFiniteNum(activeDist.circular_mean_deg) ? (
+                  <span className="tabular-nums">
+                    Prevailing direction:{" "}
+                    <span className="font-medium text-foreground">
+                      {activeDist.circular_mean_deg.toFixed(0)}°
+                    </span>
+                  </span>
+                ) : activeDist && activeDist.status === "available" ? (
+                  <span className="tabular-nums">
+                    Based on {activeDist.valid_count.toLocaleString()} valid
+                    observations · Hover tiles above for exact percentiles
+                  </span>
+                ) : undefined
+              }
+            >
+              {!activeDist ? (
+                <EmptyState
+                  icon={Grid2x2}
+                  title="Distribution unavailable"
+                  description="Summary distributions will appear once the EDA pipeline computes feature statistics."
+                  className="border-0 bg-muted shadow-none"
+                />
+              ) : activeDist.status !== "available" ? (
+                <div className="flex items-start gap-3 rounded-lg bg-muted p-4 text-sm text-foreground">
+                  <AlertCircle
+                    className="mt-0.5 size-5 shrink-0 text-alert-warning"
+                    strokeWidth={1.75}
+                  />
+                  <div>
+                    <p className="font-semibold">
+                      {activeDist.label} distribution unavailable (
+                      {humanizeIdentifier(activeDist.status)})
+                    </p>
+                    <p className="mt-1 text-xs text-foreground/80 tabular-nums">
+                      Valid rows: {activeDist.valid_count.toLocaleString()},
+                      missing rows: {activeDist.missing_count.toLocaleString()}
+                    </p>
+                  </div>
                 </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Trend shift</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDecomp.summary?.trend_start, 1)} to{" "}
-                    {formatMetricValue(activeDecomp.summary?.trend_end, 1)}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">
-                    Seasonal amplitude
-                  </dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(
-                      activeDecomp.summary?.seasonal_amplitude,
-                      2
-                    )}
-                    {activeDecompUnit ? ` ${activeDecompUnit}` : ""}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Residual std</dt>
-                  <dd className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                    {formatMetricValue(activeDecomp.summary?.residual_std, 2)}
-                  </dd>
-                </div>
-              </dl>
-            ) : undefined
-          }
-          tableColumns={
-            decompView === "cycle"
-              ? (seasonalTableColumns as ChartTableColumn<Record<string, unknown>>[])
-              : (seasonalSeriesTableColumns as ChartTableColumn<Record<string, unknown>>[])
-          }
-          tableRows={
-            decompView === "cycle"
-              ? (seasonalCycleRows as Record<string, unknown>[])
-              : (sampledSeasonalSeries as Record<string, unknown>[])
-          }
-          emptyTableMessage="No seasonal decomposition data available for this metric."
-          footer={
-            activeDecomp?.status === "available" ? (
-              <span className="tabular-nums">
-                Used {activeDecomp.sample_count_used.toLocaleString()} contiguous
-                hourly samples (period {activeDecomp.period}h)
-              </span>
-            ) : undefined
-          }
-        >
-          {!activeDecomp ? (
-            <EmptyState
-              icon={TrendingUp}
-              title="Seasonal decomposition unavailable"
-              description="Decomposition diagnostics appear once sufficient contiguous hourly observations are collected."
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : activeDecomp.status === "unavailable" ? (
-            <div className="flex items-start gap-3 rounded-lg bg-muted p-4 text-sm text-foreground">
-              <AlertCircle
-                className="mt-0.5 size-5 shrink-0 text-alert-warning"
-                strokeWidth={1.75}
-              />
-              <div>
-                <p className="font-semibold">
-                  {activeDecompLabel} seasonal decomposition unavailable
-                </p>
-                <p className="mt-1 text-xs text-foreground/80">
-                  {activeDecomp.reason}
-                </p>
-                <p className="mt-2 text-xs text-foreground/80 tabular-nums">
-                  Valid rows: {activeDecomp.valid_count.toLocaleString()} of{" "}
-                  {activeDecomp.required_rows.toLocaleString()} required
-                  {isFiniteNum(activeDecomp.longest_contiguous_count)
-                    ? `, longest contiguous span: ${activeDecomp.longest_contiguous_count.toLocaleString()}h`
-                    : ""}
-                </p>
+              ) : histogramRows.length === 0 ? (
+                <EmptyState
+                  icon={Grid2x2}
+                  title="No histogram bins recorded"
+                  description={`Valid observations (${activeDist.valid_count}) did not produce histogram bins for ${activeDist.label}.`}
+                  className="border-0 bg-muted shadow-none"
+                />
+              ) : (
+                <ChartContainer
+                  config={{
+                    count: { label: "Observations", color: activeMetricColor },
+                  }}
+                  className="h-[240px] w-full aspect-auto md:h-[260px]"
+                >
+                  <BarChart
+                    data={histogramRows}
+                    margin={{ top: 8, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid vertical={false} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="label"
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                      minTickGap={22}
+                    />
+                    <YAxis
+                      tickFormatter={formatAxisTick}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                    />
+                    <ChartTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null
+                        const row = payload[0]?.payload as
+                          | HistogramChartRow
+                          | undefined
+                        if (!row) return null
+                        const share =
+                          activeDist.valid_count > 0
+                            ? ((row.count / activeDist.valid_count) * 100).toFixed(1)
+                            : null
+                        return (
+                          <SkyCastChartTooltipCard
+                            rows={[
+                              {
+                                key: "bin",
+                                label: `${row.label}${activeDistUnit ? ` ${activeDistUnit}` : ""}`,
+                                valueText: `${row.count.toLocaleString()} hours`,
+                                color: activeMetricColor,
+                              },
+                            ]}
+                            footerNote={
+                              share !== null ? `${share}% of all hours` : null
+                            }
+                          />
+                        )
+                      }}
+                    />
+                    <Bar
+                      dataKey="count"
+                      fill={activeMetricColor}
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    />
+                  </BarChart>
+                </ChartContainer>
+              )}
+            </ChartCard>
+          </div>
+        </div>
+      ) : activeSubTab === "relationships" ? (
+        /* =============================================================== */
+        /* TAB 2: VARIABLE RELATIONSHIPS (TOP LINKS + LOWER-TRIANGLE GRID) */
+        /* =============================================================== */
+        <EdaCorrelationsCard
+          method={data.correlation_matrix?.method ?? "pearson"}
+          minPeriods={data.correlation_matrix?.min_periods ?? 1}
+          columns={corrColumns}
+          matrix={corrMatrix}
+          constantColumns={data.correlation_matrix?.constant_columns ?? []}
+          metricSpecsHint={metricSpecsHint}
+          distributions={distributions}
+        />
+      ) : (
+        /* =============================================================== */
+        /* TAB 3: TRENDS & DATA QUALITY                                    */
+        /* =============================================================== */
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+          {/* Card 3A: Time-Series Decomposition */}
+          <ChartCard
+            title="Trend & daily pattern breakdown"
+            titleInfo="Seasonal decomposition separates a weather series into three layers: the repeating 24-hour daily rhythm, the slower multi-day trend, and unusual leftover spikes."
+            subtitle={decompExplainer}
+            ariaLabel="Time-series seasonal decomposition chart"
+            controls={
+              <div className="flex flex-wrap items-center gap-2">
+                {seasonalKeys.length > 0 ? (
+                  <Select
+                    value={activeDecompKey}
+                    onValueChange={setSelectedDecompKey}
+                  >
+                    <SelectTrigger
+                      aria-label="Select decomposition metric"
+                      className="h-8 min-w-[144px] bg-card text-xs"
+                    >
+                      <SelectValue placeholder="Metric" />
+                    </SelectTrigger>
+                    <SelectContent position="popper">
+                      {seasonalKeys.map((key) => {
+                        const entry = seasonalMap[key]
+                        const unavail = entry?.status !== "available"
+                        return (
+                          <SelectItem key={key} value={key}>
+                            {resolveMetricLabel(
+                              key,
+                              metricSpecsHint,
+                              distributions
+                            )}
+                            {unavail ? " (unavailable)" : ""}
+                          </SelectItem>
+                        )
+                      })}
+                    </SelectContent>
+                  </Select>
+                ) : null}
+
+                {activeDecomp?.status === "available" ? (
+                  <div
+                    role="group"
+                    aria-label="Decomposition layer"
+                    className="inline-flex h-8 items-center rounded-md bg-muted p-0.5"
+                  >
+                    {(
+                      [
+                        { id: "cycle", label: "Daily rhythm" },
+                        { id: "trend", label: "Multi-day trend" },
+                        { id: "components", label: "Spikes" },
+                      ] as const
+                    ).map((item) => {
+                      const active = decompView === item.id
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => setDecompView(item.id)}
+                          className={cn(
+                            "inline-flex h-7 items-center rounded-sm px-2 text-xs font-medium transition-colors duration-120",
+                            active
+                              ? "bg-card text-foreground shadow-(--shadow-card)"
+                              : "text-foreground/75 hover:text-foreground"
+                          )}
+                        >
+                          {item.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ) : decompView === "cycle" ? (
-            seasonalCycleRows.length === 0 ? (
+            }
+            subHeader={
+              activeDecomp?.status === "available" ? (
+                <dl className="grid grid-cols-3 gap-2.5">
+                  <div className="rounded-lg bg-muted px-3 py-2">
+                    <dt className="text-xs text-muted-foreground">Average</dt>
+                    <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                      {formatMetricValue(activeDecomp.summary?.observed_mean, 1)}
+                      {activeDecompUnit ? ` ${activeDecompUnit}` : ""}
+                    </dd>
+                  </div>
+                  <div className="rounded-lg bg-muted px-3 py-2">
+                    <dt className="text-xs text-muted-foreground">
+                      Trend shift
+                    </dt>
+                    <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                      {formatMetricValue(activeDecomp.summary?.trend_start, 1)} →{" "}
+                      {formatMetricValue(activeDecomp.summary?.trend_end, 1)}
+                    </dd>
+                  </div>
+                  <div className="rounded-lg bg-muted px-3 py-2">
+                    <dt className="text-xs text-muted-foreground">
+                      Daily swing
+                    </dt>
+                    <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                      ±
+                      {formatMetricValue(
+                        activeDecomp.summary?.seasonal_amplitude,
+                        1
+                      )}
+                      {activeDecompUnit ? ` ${activeDecompUnit}` : ""}
+                    </dd>
+                  </div>
+                </dl>
+              ) : undefined
+            }
+            tableColumns={
+              decompView === "cycle"
+                ? (seasonalTableColumns as ChartTableColumn<Record<string, unknown>>[])
+                : (seasonalSeriesTableColumns as ChartTableColumn<
+                    Record<string, unknown>
+                  >[])
+            }
+            tableRows={
+              decompView === "cycle"
+                ? (seasonalCycleRows as Record<string, unknown>[])
+                : (sampledSeasonalSeries as Record<string, unknown>[])
+            }
+            emptyTableMessage="No seasonal decomposition data available for this metric."
+            footer={
+              activeDecomp?.status === "available" ? (
+                <span className="tabular-nums">
+                  {activeDecomp.sample_count_used.toLocaleString()} contiguous
+                  hours ({activeDecomp.period}h period) · Residual std:{" "}
+                  {formatMetricValue(activeDecomp.summary?.residual_std, 2)}
+                </span>
+              ) : undefined
+            }
+          >
+            {!activeDecomp ? (
               <EmptyState
                 icon={TrendingUp}
-                title="No 24h seasonal cycle points"
-                description="Seasonal cycle weights were not returned for this variable."
+                title="Decomposition unavailable"
+                description="Trend and daily pattern diagnostics appear once sufficient contiguous hourly observations are collected."
+                className="border-0 bg-muted shadow-none"
+              />
+            ) : activeDecomp.status === "unavailable" ? (
+              <div className="flex items-start gap-3 rounded-lg bg-muted p-4 text-sm text-foreground">
+                <AlertCircle
+                  className="mt-0.5 size-5 shrink-0 text-alert-warning"
+                  strokeWidth={1.75}
+                />
+                <div>
+                  <p className="font-semibold">
+                    {activeDecompLabel} decomposition unavailable
+                  </p>
+                  <p className="mt-1 text-xs text-foreground/80">
+                    {activeDecomp.reason}
+                  </p>
+                  <p className="mt-2 text-xs text-foreground/80 tabular-nums">
+                    Valid rows: {activeDecomp.valid_count.toLocaleString()} of{" "}
+                    {activeDecomp.required_rows.toLocaleString()} required
+                  </p>
+                </div>
+              </div>
+            ) : decompView === "cycle" ? (
+              seasonalCycleRows.length === 0 ? (
+                <EmptyState
+                  icon={TrendingUp}
+                  title="No 24h cycle points"
+                  description="Seasonal cycle weights were not returned for this variable."
+                  className="border-0 bg-muted shadow-none"
+                />
+              ) : (
+                <ChartContainer
+                  config={{
+                    seasonal: {
+                      label: "Daily rhythm",
+                      color: activeDecompColor,
+                    },
+                  }}
+                  className="h-[240px] w-full aspect-auto md:h-[260px]"
+                >
+                  <BarChart
+                    data={seasonalCycleRows}
+                    margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid vertical={false} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="hourLabel"
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                      minTickGap={16}
+                    />
+                    <YAxis
+                      domain={[cycleDomainMin, cycleDomainMax]}
+                      tickFormatter={formatAxisTick}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                    />
+                    <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} />
+                    <ChartTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null
+                        const row = payload[0]?.payload as
+                          | SeasonalCycleRow
+                          | undefined
+                        if (!row || row.seasonal === null) return null
+                        return (
+                          <SkyCastChartTooltipCard
+                            rows={[
+                              {
+                                key: "seasonal",
+                                label: `${formatHourPadded(row.hour)} ${tzShortLabel}`,
+                                valueText: `${row.seasonal > 0 ? "+" : ""}${row.seasonal.toFixed(2)}${activeDecompUnit ? ` ${activeDecompUnit}` : ""}`,
+                                color:
+                                  row.seasonal >= 0
+                                    ? "var(--shap-pos)"
+                                    : "var(--shap-neg)",
+                              },
+                            ]}
+                          />
+                        )
+                      }}
+                    />
+                    <Bar
+                      dataKey="seasonal"
+                      radius={[3, 3, 0, 0]}
+                      isAnimationActive={false}
+                    >
+                      {seasonalCycleRows.map((entry) => (
+                        <Cell
+                          key={entry.hour}
+                          fill={
+                            (entry.seasonal ?? 0) >= 0
+                              ? "var(--shap-pos)"
+                              : "var(--shap-neg)"
+                          }
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ChartContainer>
+              )
+            ) : decompView === "trend" ? (
+              <div>
+                <ChartContainer
+                  config={{
+                    observed: {
+                      label: "Observed",
+                      color: "var(--muted-foreground)",
+                    },
+                    trend: { label: "Multi-day trend", color: activeDecompColor },
+                  }}
+                  className="h-[240px] w-full aspect-auto md:h-[260px]"
+                >
+                  <ComposedChart
+                    data={sampledSeasonalSeries}
+                    margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid vertical={false} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="timestamp_utc"
+                      tickFormatter={(iso) =>
+                        formatLocalDateTime(String(iso), resolvedTimeZone, {
+                          includeZone: false,
+                        })
+                      }
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                      minTickGap={42}
+                    />
+                    <YAxis
+                      domain={[trendDomainMin, trendDomainMax]}
+                      tickFormatter={formatAxisTick}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                    />
+                    <ChartTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null
+                        const row = payload[0]?.payload as
+                          | SeasonalPointRow
+                          | undefined
+                        if (!row) return null
+                        const rows: TooltipEntryRow[] = []
+                        if (row.observed !== null) {
+                          rows.push({
+                            key: "observed",
+                            label: "Observed",
+                            valueText: formatMetricValue(row.observed, 2),
+                            color: "var(--muted-foreground)",
+                          })
+                        }
+                        if (row.trend !== null) {
+                          rows.push({
+                            key: "trend",
+                            label: "Multi-day trend",
+                            valueText: formatMetricValue(row.trend, 2),
+                            color: activeDecompColor,
+                          })
+                        }
+                        return (
+                          <SkyCastChartTooltipCard
+                            timestampUtc={row.timestamp_utc}
+                            timeZone={resolvedTimeZone}
+                            rows={rows}
+                          />
+                        )
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="observed"
+                      stroke="var(--muted-foreground)"
+                      strokeOpacity={0.45}
+                      strokeWidth={1.5}
+                      dot={false}
+                      connectNulls={false}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="trend"
+                      stroke={activeDecompColor}
+                      strokeWidth={2.25}
+                      dot={false}
+                      activeDot={{ r: 5, strokeWidth: 2 }}
+                      connectNulls={false}
+                      isAnimationActive={shouldAnimateSeasonal}
+                      animationDuration={600}
+                      animationEasing="ease-out"
+                    />
+                  </ComposedChart>
+                </ChartContainer>
+                <ChartLegendBar
+                  items={[
+                    {
+                      key: "observed",
+                      label: "Hourly observed",
+                      color: "var(--muted-foreground)",
+                      variant: "solid",
+                    },
+                    {
+                      key: "trend",
+                      label: "Smoothed trend",
+                      color: activeDecompColor,
+                      variant: "solid",
+                    },
+                  ]}
+                />
+              </div>
+            ) : (
+              <div>
+                <ChartContainer
+                  config={{
+                    resid: { label: "Unusual spike", color: "var(--chart-6)" },
+                  }}
+                  className="h-[240px] w-full aspect-auto md:h-[260px]"
+                >
+                  <ComposedChart
+                    data={sampledSeasonalSeries}
+                    margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid vertical={false} stroke="var(--border)" />
+                    <XAxis
+                      dataKey="timestamp_utc"
+                      tickFormatter={(iso) =>
+                        formatLocalDateTime(String(iso), resolvedTimeZone, {
+                          includeZone: false,
+                        })
+                      }
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                      minTickGap={42}
+                    />
+                    <YAxis
+                      domain={[compDomainMin, compDomainMax]}
+                      tickFormatter={formatAxisTick}
+                      tickLine={false}
+                      axisLine={false}
+                      width={44}
+                      tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
+                    />
+                    <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} />
+                    <ChartTooltip
+                      content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null
+                        const row = payload[0]?.payload as
+                          | SeasonalPointRow
+                          | undefined
+                        if (!row) return null
+                        const rows: TooltipEntryRow[] = []
+                        if (row.resid !== null) {
+                          rows.push({
+                            key: "resid",
+                            label: "Unusual residual",
+                            valueText: formatMetricValue(row.resid, 2),
+                            color: "var(--chart-6)",
+                          })
+                        }
+                        return (
+                          <SkyCastChartTooltipCard
+                            timestampUtc={row.timestamp_utc}
+                            timeZone={resolvedTimeZone}
+                            rows={rows}
+                          />
+                        )
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="resid"
+                      stroke="var(--chart-6)"
+                      strokeWidth={1.75}
+                      dot={false}
+                      connectNulls={false}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
+                </ChartContainer>
+                <ChartLegendBar
+                  items={[
+                    {
+                      key: "resid",
+                      label: "Residual (unexplained deviation)",
+                      color: "var(--chart-6)",
+                      variant: "solid",
+                    },
+                  ]}
+                />
+              </div>
+            )}
+          </ChartCard>
+
+          {/* Card 3B: Data Quality & Gap-Filling Audit */}
+          <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-(--shadow-card) md:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base/6 font-semibold text-card-foreground">
+                  Data quality &amp; gap filling
+                </h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  How much of the dataset came directly from sensors versus
+                  3-tier gap filling
+                </p>
+              </div>
+              {audit ? (
+                <Badge
+                  variant="secondary"
+                  className="h-6 px-2.5 text-xs font-medium"
+                >
+                  {auditNormalized.sourceLabel}
+                </Badge>
+              ) : null}
+            </div>
+
+            {!auditNormalized.isAvailable ? (
+              <EmptyState
+                icon={ShieldAlert}
+                title="Data quality audit unavailable"
+                description="Gap-filling audit details will appear once observation quality checks run."
                 className="border-0 bg-muted shadow-none"
               />
             ) : (
-              <ChartContainer
-                config={{
-                  seasonal: { label: "Seasonal delta", color: activeDecompColor },
-                }}
-                className="h-[240px] w-full aspect-auto md:h-[260px]"
-              >
-                <BarChart
-                  data={seasonalCycleRows}
-                  margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
-                >
-                  <CartesianGrid vertical={false} stroke="var(--border)" />
-                  <XAxis
-                    dataKey="hourLabel"
-                    tickLine={false}
-                    axisLine={false}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                    minTickGap={16}
-                  />
-                  <YAxis
-                    domain={[cycleDomainMin, cycleDomainMax]}
-                    tickFormatter={formatAxisTick}
-                    tickLine={false}
-                    axisLine={false}
-                    width={44}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                  />
-                  <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} />
-                  <ChartTooltip
-                    content={({ active, payload }) => {
-                      if (!active || !payload?.length) return null
-                      const row = payload[0]?.payload as
-                        | SeasonalCycleRow
-                        | undefined
-                      if (!row || row.seasonal === null) return null
-                      return (
-                        <SkyCastChartTooltipCard
-                          rows={[
-                            {
-                              key: "seasonal",
-                              label: `${formatHourPadded(row.hour)} ${tzShortLabel}`,
-                              valueText: `${row.seasonal > 0 ? "+" : ""}${row.seasonal.toFixed(2)}${activeDecompUnit ? ` ${activeDecompUnit}` : ""}`,
-                              color:
-                                row.seasonal >= 0
-                                  ? "var(--shap-pos)"
-                                  : "var(--shap-neg)",
-                            },
-                          ]}
-                        />
-                      )
-                    }}
-                  />
-                  <Bar dataKey="seasonal" radius={[3, 3, 0, 0]} isAnimationActive={false}>
-                    {seasonalCycleRows.map((entry) => (
-                      <Cell
-                        key={entry.hour}
-                        fill={
-                          (entry.seasonal ?? 0) >= 0
-                            ? "var(--shap-pos)"
-                            : "var(--shap-neg)"
-                        }
+              <div className="flex flex-col gap-4">
+                {/* Visual Data Health Summary */}
+                {auditNormalized.observedPct !== null ? (
+                  <div className="rounded-lg bg-muted p-4">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Direct sensor coverage
+                      </span>
+                      <span className="font-display text-h2 font-semibold text-foreground tabular-nums">
+                        {auditNormalized.observedPct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-card">
+                      <div
+                        className="h-full rounded-full bg-aqi-good transition-all duration-150"
+                        style={{
+                          width: `${Math.max(2, auditNormalized.observedPct)}%`,
+                        }}
                       />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ChartContainer>
-            )
-          ) : decompView === "trend" ? (
-            <div>
-              <ChartContainer
-                config={{
-                  observed: { label: "Observed", color: "var(--muted-foreground)" },
-                  trend: { label: "Trend", color: activeDecompColor },
-                }}
-                className="h-[240px] w-full aspect-auto md:h-[260px]"
-              >
-                <ComposedChart
-                  data={sampledSeasonalSeries}
-                  margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
-                >
-                  <CartesianGrid vertical={false} stroke="var(--border)" />
-                  <XAxis
-                    dataKey="timestamp_utc"
-                    tickFormatter={(iso) =>
-                      formatLocalDateTime(String(iso), resolvedTimeZone, {
-                        includeZone: false,
-                      })
-                    }
-                    tickLine={false}
-                    axisLine={false}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                    minTickGap={42}
-                  />
-                  <YAxis
-                    domain={[trendDomainMin, trendDomainMax]}
-                    tickFormatter={formatAxisTick}
-                    tickLine={false}
-                    axisLine={false}
-                    width={44}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                  />
-                  <ChartTooltip
-                    content={({ active, payload }) => {
-                      if (!active || !payload?.length) return null
-                      const row = payload[0]?.payload as
-                        | SeasonalPointRow
-                        | undefined
-                      if (!row) return null
-                      const rows: TooltipEntryRow[] = []
-                      if (row.observed !== null) {
-                        rows.push({
-                          key: "observed",
-                          label: "Observed",
-                          valueText: formatMetricValue(row.observed, 2),
-                          color: "var(--muted-foreground)",
-                        })
-                      }
-                      if (row.trend !== null) {
-                        rows.push({
-                          key: "trend",
-                          label: "Trend",
-                          valueText: formatMetricValue(row.trend, 2),
-                          color: activeDecompColor,
-                        })
-                      }
-                      return (
-                        <SkyCastChartTooltipCard
-                          timestampUtc={row.timestamp_utc}
-                          timeZone={resolvedTimeZone}
-                          rows={rows}
-                        />
-                      )
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="observed"
-                    stroke="var(--muted-foreground)"
-                    strokeOpacity={0.5}
-                    strokeWidth={1.5}
-                    dot={false}
-                    connectNulls={false}
-                    isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="trend"
-                    stroke={activeDecompColor}
-                    strokeWidth={2.25}
-                    dot={false}
-                    activeDot={{ r: 5, strokeWidth: 2 }}
-                    connectNulls={false}
-                    isAnimationActive={shouldAnimateSeasonal}
-                    animationDuration={600}
-                    animationEasing="ease-out"
-                  />
-                </ComposedChart>
-              </ChartContainer>
-              <ChartLegendBar
-                items={[
-                  {
-                    key: "observed",
-                    label: "Observed",
-                    color: "var(--muted-foreground)",
-                    variant: "solid",
-                  },
-                  {
-                    key: "trend",
-                    label: "Smoothed trend",
-                    color: activeDecompColor,
-                    variant: "solid",
-                  },
-                ]}
-              />
-            </div>
-          ) : (
-            <div>
-              <ChartContainer
-                config={{
-                  seasonal: { label: "Seasonal", color: "var(--chart-4)" },
-                  resid: { label: "Residual", color: "var(--chart-6)" },
-                }}
-                className="h-[240px] w-full aspect-auto md:h-[260px]"
-              >
-                <ComposedChart
-                  data={sampledSeasonalSeries}
-                  margin={{ top: 10, right: 12, bottom: 4, left: 0 }}
-                >
-                  <CartesianGrid vertical={false} stroke="var(--border)" />
-                  <XAxis
-                    dataKey="timestamp_utc"
-                    tickFormatter={(iso) =>
-                      formatLocalDateTime(String(iso), resolvedTimeZone, {
-                        includeZone: false,
-                      })
-                    }
-                    tickLine={false}
-                    axisLine={false}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                    minTickGap={42}
-                  />
-                  <YAxis
-                    domain={[compDomainMin, compDomainMax]}
-                    tickFormatter={formatAxisTick}
-                    tickLine={false}
-                    axisLine={false}
-                    width={44}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
-                  />
-                  <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} />
-                  <ChartTooltip
-                    content={({ active, payload }) => {
-                      if (!active || !payload?.length) return null
-                      const row = payload[0]?.payload as
-                        | SeasonalPointRow
-                        | undefined
-                      if (!row) return null
-                      const rows: TooltipEntryRow[] = []
-                      if (row.seasonal !== null) {
-                        rows.push({
-                          key: "seasonal",
-                          label: "Seasonal",
-                          valueText: formatMetricValue(row.seasonal, 2),
-                          color: "var(--chart-4)",
-                        })
-                      }
-                      if (row.resid !== null) {
-                        rows.push({
-                          key: "resid",
-                          label: "Residual",
-                          valueText: formatMetricValue(row.resid, 2),
-                          color: "var(--chart-6)",
-                        })
-                      }
-                      return (
-                        <SkyCastChartTooltipCard
-                          timestampUtc={row.timestamp_utc}
-                          timeZone={resolvedTimeZone}
-                          rows={rows}
-                        />
-                      )
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="seasonal"
-                    stroke="var(--chart-4)"
-                    strokeWidth={1.75}
-                    dot={false}
-                    connectNulls={false}
-                    isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="resid"
-                    stroke="var(--chart-6)"
-                    strokeWidth={1.5}
-                    dot={false}
-                    connectNulls={false}
-                    isAnimationActive={false}
-                  />
-                </ComposedChart>
-              </ChartContainer>
-              <ChartLegendBar
-                items={[
-                  {
-                    key: "seasonal",
-                    label: "Seasonal component",
-                    color: "var(--chart-4)",
-                    variant: "solid",
-                  },
-                  {
-                    key: "resid",
-                    label: "Residual",
-                    color: "var(--chart-6)",
-                    variant: "solid",
-                  },
-                ]}
-              />
-            </div>
-          )}
-        </ChartCard>
-
-        {/* Card 5: Imputation Audit */}
-        <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-(--shadow-card) md:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 className="text-base/6 font-semibold text-card-foreground">
-                Data quality and imputation audit
-              </h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                Missing observation counts and gap-filling tier coverage
-              </p>
-            </div>
-            {audit ? (
-              <Badge variant="secondary" className="h-6 px-2.5 text-xs font-medium">
-                {auditNormalized.sourceLabel}
-              </Badge>
-            ) : null}
-          </div>
-
-          {!auditNormalized.isAvailable ? (
-            <EmptyState
-              icon={ShieldAlert}
-              title="Imputation audit unavailable"
-              description="Gap-filling audit details will appear once observation quality checks run."
-              className="border-0 bg-muted shadow-none"
-            />
-          ) : (
-            <div className="flex flex-col gap-4">
-              <dl className="grid grid-cols-3 gap-2">
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Total rows</dt>
-                  <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
-                    {auditNormalized.totalRows !== null
-                      ? auditNormalized.totalRows.toLocaleString()
-                      : "—"}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Imputed rows</dt>
-                  <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
-                    {auditNormalized.imputedRows !== null
-                      ? auditNormalized.imputedRows.toLocaleString()
-                      : "—"}
-                  </dd>
-                </div>
-                <div className="rounded-lg bg-muted px-3 py-2">
-                  <dt className="text-xs text-foreground/75">Tier tracked</dt>
-                  <dd className="mt-0.5 text-sm font-semibold text-foreground">
-                    {auditNormalized.tierTracked ? "Yes" : "No"}
-                  </dd>
-                </div>
-              </dl>
-
-              {auditNormalized.tierEntries.length > 0 ? (
-                <div className="flex flex-col gap-2 rounded-lg bg-muted p-3.5">
-                  <div className="text-xs font-medium text-foreground">
-                    Imputation tier breakdown
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground tabular-nums">
+                      {auditNormalized.totalRows?.toLocaleString()} total hours ·{" "}
+                      {auditNormalized.imputedRows?.toLocaleString()} gap-filled
+                    </p>
                   </div>
-                  <div className="flex flex-col gap-2">
+                ) : (
+                  <dl className="grid grid-cols-2 gap-2.5">
+                    <div className="rounded-lg bg-muted px-3 py-2">
+                      <dt className="text-xs text-muted-foreground">
+                        Total hours
+                      </dt>
+                      <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                        {auditNormalized.totalRows !== null
+                          ? auditNormalized.totalRows.toLocaleString()
+                          : "—"}
+                      </dd>
+                    </div>
+                    <div className="rounded-lg bg-muted px-3 py-2">
+                      <dt className="text-xs text-muted-foreground">
+                        Gap-filled hours
+                      </dt>
+                      <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                        {auditNormalized.imputedRows !== null
+                          ? auditNormalized.imputedRows.toLocaleString()
+                          : "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                )}
+
+                {auditNormalized.tierEntries.length > 0 ? (
+                  <div className="flex flex-col gap-2.5">
+                    <div className="text-xs font-medium text-foreground">
+                      Gap-filling method breakdown
+                    </div>
                     {auditNormalized.tierEntries.map((entry) => (
                       <div key={entry.tier} className="flex flex-col gap-1">
                         <div className="flex items-center justify-between text-xs text-foreground tabular-nums">
@@ -1995,7 +2254,7 @@ export function EdaTab({
                             {entry.count.toLocaleString()} ({entry.pct.toFixed(1)}%)
                           </span>
                         </div>
-                        <div className="h-2 w-full overflow-hidden rounded-full bg-card">
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                           <div
                             className="h-full rounded-full bg-primary"
                             style={{ width: `${Math.max(2, entry.pct)}%` }}
@@ -2004,57 +2263,81 @@ export function EdaTab({
                       </div>
                     ))}
                   </div>
-                </div>
-              ) : null}
+                ) : null}
 
-              {auditNormalized.missingEntries.length > 0 ? (
-                <Table
-                  aria-label="Observed missing counts by variable"
-                  containerClassName="max-h-64 overflow-auto rounded-md border border-border"
-                >
-                  <TableHeader className="sticky top-0 z-10 bg-muted">
-                    <TableRow className="hover:bg-muted">
-                      <TableHead className="h-10 px-4 py-2 text-xs font-medium text-foreground">
-                        Variable
-                      </TableHead>
-                      <TableHead className="h-10 px-4 py-2 text-right text-xs font-medium text-foreground">
-                        Missing rows
-                      </TableHead>
-                      <TableHead className="h-10 px-4 py-2 text-right text-xs font-medium text-foreground">
-                        Share
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {auditNormalized.missingEntries.map((entry) => (
-                      <TableRow key={entry.column} className="h-[52px] md:h-11">
-                        <TableCell className="px-4 py-2.5 text-sm font-medium text-foreground">
-                          {entry.label}
-                        </TableCell>
-                        <TableCell className="px-4 py-2.5 text-right text-sm tabular-nums">
-                          {entry.missingCount.toLocaleString()}
-                        </TableCell>
-                        <TableCell className="px-4 py-2.5 text-right text-sm text-muted-foreground tabular-nums">
-                          {entry.missingPct !== null
-                            ? `${entry.missingPct.toFixed(1)}%`
-                            : "—"}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <EmptyState
-                  icon={Layers}
-                  title="No missing column tallies"
-                  description="Per-variable missing counts were not recorded in this audit summary."
-                  className="border-0 bg-muted shadow-none"
-                />
-              )}
-            </div>
-          )}
-        </section>
-      </div>
+                {/* Collapsible Per-Variable Missing Table */}
+                {auditNormalized.missingEntries.length > 0 ? (
+                  <div className="flex flex-col gap-2 border-t border-border pt-3">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={showMissingTable}
+                      onClick={() => setShowMissingTable((prev) => !prev)}
+                      className="h-8 justify-between px-2 text-xs font-medium text-foreground"
+                    >
+                      <span>
+                        Inspect per-variable coverage (
+                        {auditNormalized.missingEntries.length} variables)
+                      </span>
+                      {showMissingTable ? (
+                        <ChevronUp className="size-3.5" strokeWidth={1.75} />
+                      ) : (
+                        <ChevronDown className="size-3.5" strokeWidth={1.75} />
+                      )}
+                    </Button>
+
+                    {showMissingTable ? (
+                      <Table
+                        aria-label="Observed missing counts by variable"
+                        containerClassName="max-h-60 overflow-auto rounded-md border border-border"
+                      >
+                        <TableHeader className="sticky top-0 z-10 bg-muted">
+                          <TableRow className="hover:bg-muted">
+                            <TableHead className="h-9 px-3 py-2 text-xs font-medium text-foreground">
+                              Variable
+                            </TableHead>
+                            <TableHead className="h-9 px-3 py-2 text-right text-xs font-medium text-foreground">
+                              Missing
+                            </TableHead>
+                            <TableHead className="h-9 px-3 py-2 text-right text-xs font-medium text-foreground">
+                              Share
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {auditNormalized.missingEntries.map((entry) => (
+                            <TableRow key={entry.column} className="h-10">
+                              <TableCell className="px-3 py-2 text-xs font-medium text-foreground">
+                                {entry.label}
+                              </TableCell>
+                              <TableCell className="px-3 py-2 text-right text-xs tabular-nums">
+                                {entry.missingCount.toLocaleString()}
+                              </TableCell>
+                              <TableCell className="px-3 py-2 text-right text-xs text-muted-foreground tabular-nums">
+                                {entry.missingPct !== null
+                                  ? `${entry.missingPct.toFixed(1)}%`
+                                  : "—"}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    ) : null}
+                  </div>
+                ) : (
+                  <EmptyState
+                    icon={Layers}
+                    title="No missing column tallies"
+                    description="Per-variable missing counts were not recorded in this audit summary."
+                    className="border-0 bg-muted shadow-none"
+                  />
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   )
 }

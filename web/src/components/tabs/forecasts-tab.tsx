@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { History, RotateCcw } from "lucide-react"
+import { ChevronDown, ChevronUp, HelpCircle, History, RotateCcw } from "lucide-react"
 import { cn } from "cn"
 import {
   CartesianGrid,
@@ -48,12 +48,17 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import {
   fetchForecastsHistory,
   type ForecastPoint,
   type ForecastsHistoryResponse,
   type MetricSpecsMap,
 } from "@/lib/api"
-import { formatLocalDateTime, parseIsoDate } from "@/lib/time"
+import { formatLocalDateTime, formatLocalTime, parseIsoDate } from "@/lib/time"
 import {
   formatMetricValue,
   formatModelLabel,
@@ -131,7 +136,9 @@ export function ForecastsTab({
   const [lookbackHours, setLookbackHours] = useState<12 | 24>(24)
   const [selectedHorizon, setSelectedHorizon] = useState<string>("all")
   const [selectedModel, setSelectedModel] = useState<string>("all")
-  const [showNaiveBaseline, setShowNaiveBaseline] = useState<boolean>(true)
+  const [showNaiveBaseline, setShowNaiveBaseline] = useState<boolean>(false)
+  const [ledgerExpanded, setLedgerExpanded] = useState<boolean>(false)
+  const [showAllLedgerCols, setShowAllLedgerCols] = useState<boolean>(false)
   const [limit, setLimit] = useState<number>(DEFAULT_LIMIT)
   const [localRetryNonce, setLocalRetryNonce] = useState<number>(0)
 
@@ -198,19 +205,24 @@ export function ForecastsTab({
             Object.keys(response.latest_forecast ?? {})
           )
 
-        // Remember models and horizons observed across queries so filter menus stay populated.
         const batchModels = new Set<string>()
         const batchHorizons = new Set<number>()
         for (const pt of response.history ?? []) {
           if (pt.model_family) batchModels.add(pt.model_family)
-          if (typeof pt.horizon_hour === "number" && Number.isFinite(pt.horizon_hour)) {
+          if (
+            typeof pt.horizon_hour === "number" &&
+            Number.isFinite(pt.horizon_hour)
+          ) {
             batchHorizons.add(pt.horizon_hour)
           }
         }
         for (const pts of Object.values(response.latest_forecast ?? {})) {
           for (const pt of pts) {
             if (pt.model_family) batchModels.add(pt.model_family)
-            if (typeof pt.horizon_hour === "number" && Number.isFinite(pt.horizon_hour)) {
+            if (
+              typeof pt.horizon_hour === "number" &&
+              Number.isFinite(pt.horizon_hour)
+            ) {
               batchHorizons.add(pt.horizon_hour)
             }
           }
@@ -294,7 +306,10 @@ export function ForecastsTab({
     )
   }, [queryMetric, availableMetrics, metricSpecs])
 
-  const activeSpec = getMetricSpec(activeMetric, metricSpecs)
+  const activeSpec = useMemo(
+    () => getMetricSpec(activeMetric, metricSpecs),
+    [activeMetric, metricSpecs]
+  )
   const activeColorVar = getMetricColorVar(activeMetric, metricSpecs)
   const activeUnit = activeSpec?.unit ?? ""
   const activeLabel = activeSpec?.label ?? activeMetric
@@ -308,17 +323,53 @@ export function ForecastsTab({
   }, [data?.forecast_horizon_hours, seenHorizons])
 
   const modelOptions = useMemo(() => {
-    const combined = Array.from(new Set([...STANDARD_MODELS, ...seenModels]))
-    return combined
+    return Array.from(new Set([...STANDARD_MODELS, ...seenModels]))
   }, [seenModels])
+
+  const activeLatestForecast = useMemo(
+    () => data?.latest_forecast?.[activeMetric] ?? [],
+    [data?.latest_forecast, activeMetric]
+  )
+
+  // Next-24h snapshot (predicted high/low with times)
+  const forecastSnapshot = useMemo(() => {
+    let highVal = -Infinity
+    let highTs: string | null = null
+    let lowVal = Infinity
+    let lowTs: string | null = null
+
+    for (const pt of activeLatestForecast) {
+      if (
+        typeof pt.predicted_value !== "number" ||
+        !Number.isFinite(pt.predicted_value)
+      ) {
+        continue
+      }
+      if (pt.predicted_value > highVal) {
+        highVal = pt.predicted_value
+        highTs = pt.target_timestamp_utc
+      }
+      if (pt.predicted_value < lowVal) {
+        lowVal = pt.predicted_value
+        lowTs = pt.target_timestamp_utc
+      }
+    }
+
+    return {
+      hasPoints: Number.isFinite(highVal) && Number.isFinite(lowVal),
+      highVal: Number.isFinite(highVal) ? highVal : null,
+      highTs,
+      lowVal: Number.isFinite(lowVal) ? lowVal : null,
+      lowTs,
+    }
+  }, [activeLatestForecast])
 
   const metricScopedHistory = useMemo(() => {
     const raw = data?.history ?? []
     return raw.filter((pt) => !pt.metric || pt.metric === activeMetric)
   }, [data?.history, activeMetric])
 
-  // Deduplicate by target_timestamp_utc for the comparison line chart so overlapping
-  // horizon runs never cause vertical zigzags; keep shortest horizon / latest issued run.
+  // Deduplicate by target_timestamp_utc for the comparison line chart
   const historyChartRows = useMemo<HistoryChartRow[]>(() => {
     const byTarget = new Map<string, ForecastPoint>()
 
@@ -449,11 +500,12 @@ export function ForecastsTab({
     return getAqiReferenceBands(historyDomainMin, historyDomainMax)
   }, [activeMetric, historyDomainMin, historyDomainMax])
 
+  // Use neutral dark stroke for Actual and metric accent color for Forecast so they separate cleanly.
   const historyChartConfig = useMemo(
     () => ({
-      actual: { label: "Actual", color: activeColorVar },
-      predicted: { label: "Forecast", color: activeColorVar },
-      naive: { label: "24h naive baseline", color: "var(--model-naive)" },
+      actual: { label: "Actual observed", color: "var(--foreground)" },
+      predicted: { label: "Model forecast", color: activeColorVar },
+      naive: { label: "24h baseline", color: "var(--model-naive)" },
     }),
     [activeColorVar]
   )
@@ -462,13 +514,13 @@ export function ForecastsTab({
     const items: ChartLegendItem[] = [
       {
         key: "actual",
-        label: "Actual",
-        color: activeColorVar,
+        label: "Actual observed",
+        color: "var(--foreground)",
         variant: "solid",
       },
       {
         key: "predicted",
-        label: "Forecast",
+        label: "Model forecast",
         color: activeColorVar,
         variant: "dashed",
       },
@@ -476,7 +528,7 @@ export function ForecastsTab({
     if (showNaiveBaseline && hasNaiveSeries) {
       items.push({
         key: "naive",
-        label: "24h naive baseline",
+        label: "24h baseline",
         color: "var(--model-naive)",
         variant: "dotted",
       })
@@ -556,7 +608,6 @@ export function ForecastsTab({
         <div className="h-11 w-full animate-pulse rounded-lg bg-muted" />
         <div className="h-[380px] animate-pulse rounded-xl border border-border bg-muted" />
         <div className="h-[340px] animate-pulse rounded-xl border border-border bg-muted" />
-        <div className="h-[260px] animate-pulse rounded-xl border border-border bg-muted" />
       </div>
     )
   }
@@ -584,7 +635,6 @@ export function ForecastsTab({
 
   const hasActiveFilters =
     selectedHorizon !== "all" || selectedModel !== "all"
-  const activeLatestForecast = data.latest_forecast[activeMetric] ?? []
 
   return (
     <div className="flex flex-col gap-6 md:gap-8">
@@ -593,11 +643,12 @@ export function ForecastsTab({
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h2 className="font-display text-[1.625rem]/8 font-semibold text-foreground md:text-h1">
-              Forecasts and verification
+              Forecasts and accuracy check
             </h2>
             <p className="mt-1 max-w-[68ch] text-sm/5 text-muted-foreground">
-              {data.forecast_horizon_hours}-hour trajectory, historical forecast
-              accuracy against observations, and hourly prediction ledger.
+              Where {activeLabel.toLowerCase()} is headed over the next{" "}
+              {data.forecast_horizon_hours} hours, and how accurately recent
+              forecasts matched real weather.
             </p>
           </div>
           {isFetching ? (
@@ -625,7 +676,7 @@ export function ForecastsTab({
         />
       ) : null}
 
-      {/* Section 1: 24h Trajectory Chart with 12h / 24h lookback toggle */}
+      {/* Section 1: 24h Trajectory Chart with Next-24h Snapshot */}
       <ForecastTrajectoryChart
         metric={activeMetric}
         metricSpecs={metricSpecs}
@@ -634,8 +685,48 @@ export function ForecastsTab({
         lookbackHours={lookbackHours}
         horizonHours={data.forecast_horizon_hours}
         timeZone={resolvedTimeZone}
-        title={`${activeLabel} ${data.forecast_horizon_hours}-hour trajectory`}
-        subtitle={`${lookbackHours}h observed history and ${data.forecast_horizon_hours}h forecast with confidence interval`}
+        title={`Next ${data.forecast_horizon_hours}h ${activeLabel.toLowerCase()} outlook`}
+        subtitle={`Last ${lookbackHours}h observed readings followed by ${data.forecast_horizon_hours}h forecast with confidence range`}
+        subHeader={
+          forecastSnapshot.hasPoints ? (
+            <dl className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+              <div className="rounded-lg bg-muted px-3 py-2">
+                <dt className="text-xs text-muted-foreground">
+                  Expected high
+                </dt>
+                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                  {formatValueWithUnit(forecastSnapshot.highVal, activeUnit, 1)}
+                  {forecastSnapshot.highTs ? (
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      at {formatLocalTime(forecastSnapshot.highTs, resolvedTimeZone)}
+                    </span>
+                  ) : null}
+                </dd>
+              </div>
+              <div className="rounded-lg bg-muted px-3 py-2">
+                <dt className="text-xs text-muted-foreground">Expected low</dt>
+                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                  {formatValueWithUnit(forecastSnapshot.lowVal, activeUnit, 1)}
+                  {forecastSnapshot.lowTs ? (
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      at {formatLocalTime(forecastSnapshot.lowTs, resolvedTimeZone)}
+                    </span>
+                  ) : null}
+                </dd>
+              </div>
+              <div className="col-span-2 rounded-lg bg-muted px-3 py-2 sm:col-span-1">
+                <dt className="text-xs text-muted-foreground">
+                  Recent accuracy
+                </dt>
+                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                  {verificationStats.mae !== null
+                    ? `±${formatValueWithUnit(verificationStats.mae, activeUnit, 1)} avg miss`
+                    : `${activeLatestForecast.length}h forecast active`}
+                </dd>
+              </div>
+            </dl>
+          ) : undefined
+        }
         controls={
           <div
             role="group"
@@ -657,7 +748,7 @@ export function ForecastsTab({
                       : "text-foreground/75 hover:text-foreground"
                   )}
                 >
-                  {hrs}h lookback
+                  {hrs}h history
                 </button>
               )
             })}
@@ -665,13 +756,14 @@ export function ForecastsTab({
         }
       />
 
-      {/* Section 2: Forecast vs. Actual History */}
+      {/* Section 2: Forecast vs. Actual Accuracy Check */}
       <ChartCard
-        title={`${activeLabel} forecast vs. actual history`}
+        title={`How accurate were recent ${activeLabel.toLowerCase()} forecasts?`}
+        titleInfo="Compares past model predictions (colored dashed line) against what actually happened (solid dark line). Enable 24h baseline to compare against simply repeating yesterday's weather."
         subtitle={
           hasActualSeries
-            ? "Predicted values compared against realized observations and the 24h naive baseline"
-            : "Predicted trajectory history (actual observations populate once target hours complete)"
+            ? "Solid dark line is actual weather; colored dashed line is what SkyCast predicted"
+            : "Predicted history (actual observations fill in as target hours pass)"
         }
         ariaLabel={`${activeLabel} forecast versus actual history chart`}
         controls={
@@ -679,15 +771,15 @@ export function ForecastsTab({
             <Select value={selectedHorizon} onValueChange={setSelectedHorizon}>
               <SelectTrigger
                 aria-label="Filter by forecast horizon"
-                className="h-8 min-w-[128px] bg-card text-xs"
+                className="h-8 min-w-[122px] bg-card text-xs"
               >
                 <SelectValue placeholder="Horizon" />
               </SelectTrigger>
               <SelectContent position="popper">
-                <SelectItem value="all">All horizons</SelectItem>
+                <SelectItem value="all">Best horizon</SelectItem>
                 {horizonOptions.map((h) => (
                   <SelectItem key={h} value={String(h)}>
-                    +{h}h horizon
+                    +{h}h ahead
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -696,7 +788,7 @@ export function ForecastsTab({
             <Select value={selectedModel} onValueChange={setSelectedModel}>
               <SelectTrigger
                 aria-label="Filter by model family"
-                className="h-8 min-w-[136px] bg-card text-xs"
+                className="h-8 min-w-[128px] bg-card text-xs"
               >
                 <SelectValue placeholder="Model" />
               </SelectTrigger>
@@ -710,47 +802,74 @@ export function ForecastsTab({
               </SelectContent>
             </Select>
 
-            <Button
-              type="button"
-              variant={showNaiveBaseline ? "secondary" : "outline"}
-              size="sm"
-              className="h-8 px-3 text-xs font-medium"
-              aria-pressed={showNaiveBaseline}
-              onClick={() => setShowNaiveBaseline((prev) => !prev)}
-            >
-              24h baseline
-            </Button>
+            {hasNaiveSeries ? (
+              <Button
+                type="button"
+                variant={showNaiveBaseline ? "secondary" : "outline"}
+                size="sm"
+                className="h-8 px-2.5 text-xs font-medium"
+                aria-pressed={showNaiveBaseline}
+                onClick={() => setShowNaiveBaseline((prev) => !prev)}
+              >
+                24h baseline
+              </Button>
+            ) : null}
           </div>
         }
         subHeader={
           verificationStats.count > 0 ? (
-            <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <dl className="grid grid-cols-3 gap-2.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="rounded-lg bg-muted px-3 py-2">
+                    <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <span>Average miss</span>
+                      <HelpCircle className="size-3" strokeWidth={1.75} />
+                    </dt>
+                    <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
+                      ±{formatValueWithUnit(verificationStats.mae, activeUnit, 2)}
+                    </dd>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent className="text-xs tabular-nums">
+                  MAE: {formatValueWithUnit(verificationStats.mae, activeUnit, 2)}{" "}
+                  · RMSE:{" "}
+                  {formatValueWithUnit(verificationStats.rmse, activeUnit, 2)}
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="rounded-lg bg-muted px-3 py-2">
+                    <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <span>Vs. 24h baseline</span>
+                      <HelpCircle className="size-3" strokeWidth={1.75} />
+                    </dt>
+                    <dd
+                      className={cn(
+                        "mt-0.5 text-sm font-semibold tabular-nums",
+                        verificationStats.improvementPct !== null &&
+                          verificationStats.improvementPct > 0
+                          ? "text-aqi-good-fg"
+                          : "text-foreground"
+                      )}
+                    >
+                      {verificationStats.improvementPct !== null
+                        ? `${verificationStats.improvementPct >= 0 ? "+" : ""}${verificationStats.improvementPct.toFixed(1)}%`
+                        : "—"}
+                    </dd>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs">
+                  Error reduction compared to predicting yesterday&apos;s weather
+                  at the same hour.
+                </TooltipContent>
+              </Tooltip>
+
               <div className="rounded-lg bg-muted px-3 py-2">
-                <dt className="text-xs text-foreground/75">Verified hours</dt>
+                <dt className="text-xs text-muted-foreground">Hours checked</dt>
                 <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
                   {verificationStats.count}
-                </dd>
-              </div>
-              <div className="rounded-lg bg-muted px-3 py-2">
-                <dt className="text-xs text-foreground/75">Mean abs. error</dt>
-                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
-                  {formatValueWithUnit(verificationStats.mae, activeUnit, 2)}
-                </dd>
-              </div>
-              <div className="rounded-lg bg-muted px-3 py-2">
-                <dt className="text-xs text-foreground/75">RMSE</dt>
-                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
-                  {formatValueWithUnit(verificationStats.rmse, activeUnit, 2)}
-                </dd>
-              </div>
-              <div className="rounded-lg bg-muted px-3 py-2">
-                <dt className="text-xs text-foreground/75">
-                  vs. 24h baseline
-                </dt>
-                <dd className="mt-0.5 text-sm font-semibold text-foreground tabular-nums">
-                  {verificationStats.improvementPct !== null
-                    ? `${verificationStats.improvementPct >= 0 ? "+" : ""}${verificationStats.improvementPct.toFixed(1)}%`
-                    : "—"}
                 </dd>
               </div>
             </dl>
@@ -762,8 +881,8 @@ export function ForecastsTab({
         footer={
           selectedHorizon === "all" && historyChartRows.length > 0 ? (
             <span>
-              Chart displays the shortest-horizon forecast per target hour; full
-              hourly entries appear in the ledger below.
+              Chart shows the closest-horizon forecast per hour; expand the
+              hourly ledger below to inspect every individual run.
             </span>
           ) : undefined
         }
@@ -859,13 +978,13 @@ export function ForecastsTab({
                     if (row.actual !== null) {
                       tooltipRows.push({
                         key: "actual",
-                        label: "Actual",
+                        label: "Actual observed",
                         valueText: formatValueWithUnit(
                           row.actual,
                           activeUnit,
                           1
                         ),
-                        color: activeColorVar,
+                        color: "var(--foreground)",
                       })
                     }
                     if (row.predicted !== null) {
@@ -913,7 +1032,7 @@ export function ForecastsTab({
                     type="monotone"
                     dataKey="naive"
                     stroke="var(--model-naive)"
-                    strokeWidth={2}
+                    strokeWidth={1.75}
                     strokeDasharray="2 4"
                     dot={false}
                     activeDot={{ r: 4, strokeWidth: 2 }}
@@ -925,8 +1044,8 @@ export function ForecastsTab({
                 <Line
                   type="monotone"
                   dataKey="actual"
-                  stroke={activeColorVar}
-                  strokeWidth={2}
+                  stroke="var(--foreground)"
+                  strokeWidth={2.25}
                   dot={false}
                   activeDot={{ r: 5, strokeWidth: 2 }}
                   connectNulls={false}
@@ -956,7 +1075,7 @@ export function ForecastsTab({
         )}
       </ChartCard>
 
-      {/* Section 3: Hourly Forecast Ledger */}
+      {/* Section 3: Collapsible Hourly Forecast Ledger */}
       <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-(--shadow-card) md:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -964,15 +1083,16 @@ export function ForecastsTab({
               Hourly forecast ledger
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-              Showing {sortedLedgerRows.length} of {data.total_count}{" "}
-              {data.total_count === 1 ? "record" : "records"} for {activeLabel}
+              {data.total_count.toLocaleString()}{" "}
+              {data.total_count === 1 ? "stored record" : "stored records"} for{" "}
+              {activeLabel}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {hasActiveFilters ? (
               <Badge variant="secondary" className="h-6 px-2 text-xs">
-                {selectedHorizon !== "all" ? `+${selectedHorizon}h` : "All horizons"}
+                {selectedHorizon !== "all" ? `+${selectedHorizon}h` : "Best horizon"}
                 {" / "}
                 {selectedModel !== "all"
                   ? formatModelLabel(selectedModel)
@@ -980,7 +1100,21 @@ export function ForecastsTab({
               </Badge>
             ) : null}
 
-            {sortedLedgerRows.length < data.total_count && limit < EXPANDED_LIMIT ? (
+            {ledgerExpanded ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setShowAllLedgerCols((prev) => !prev)}
+              >
+                {showAllLedgerCols ? "Compact columns" : "All columns"}
+              </Button>
+            ) : null}
+
+            {ledgerExpanded &&
+            sortedLedgerRows.length < data.total_count &&
+            limit < EXPANDED_LIMIT ? (
               <Button
                 type="button"
                 variant="outline"
@@ -989,126 +1123,156 @@ export function ForecastsTab({
                 disabled={isFetching}
                 onClick={() => setLimit(EXPANDED_LIMIT)}
               >
-                Load more records
+                Load more
               </Button>
             ) : null}
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-expanded={ledgerExpanded}
+              onClick={() => setLedgerExpanded((prev) => !prev)}
+              className="h-8 gap-1.5 px-3 text-xs font-medium"
+            >
+              <span>{ledgerExpanded ? "Hide ledger" : "Inspect ledger"}</span>
+              {ledgerExpanded ? (
+                <ChevronUp className="size-3.5" strokeWidth={1.75} />
+              ) : (
+                <ChevronDown className="size-3.5" strokeWidth={1.75} />
+              )}
+            </Button>
           </div>
         </div>
 
-        {sortedLedgerRows.length === 0 ? (
-          <EmptyState
-            icon={History}
-            title="No ledger entries yet"
-            description={
-              hasActiveFilters
-                ? "Clear your horizon or model filter to view stored hourly forecast records."
-                : "Forecast records appear here as prediction pipelines run."
-            }
-            actionLabel={hasActiveFilters ? "Reset filters" : undefined}
-            onAction={hasActiveFilters ? handleResetFilters : undefined}
-            className="border-0 bg-muted shadow-none"
-          />
-        ) : (
-          <Table
-            aria-label={`${activeLabel} hourly forecast ledger`}
-            containerClassName="max-h-[420px] overflow-auto rounded-md border border-border"
-          >
-            <TableHeader className="sticky top-0 z-10 bg-muted">
-              <TableRow className="hover:bg-muted">
-                <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
-                  Target time
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
-                  Issued
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  Horizon
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
-                  Model
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  Predicted{activeUnit ? ` (${activeUnit})` : ""}
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  Interval
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  24h baseline
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  Actual{activeUnit ? ` (${activeUnit})` : ""}
-                </TableHead>
-                <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
-                  Error
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sortedLedgerRows.map((row) => {
-                const hasBand =
-                  typeof row.lower_bound === "number" &&
-                  Number.isFinite(row.lower_bound) &&
-                  typeof row.upper_bound === "number" &&
-                  Number.isFinite(row.upper_bound)
+        {ledgerExpanded ? (
+          sortedLedgerRows.length === 0 ? (
+            <EmptyState
+              icon={History}
+              title="No ledger entries yet"
+              description={
+                hasActiveFilters
+                  ? "Clear your horizon or model filter to view stored hourly forecast records."
+                  : "Forecast records appear here as prediction pipelines run."
+              }
+              actionLabel={hasActiveFilters ? "Reset filters" : undefined}
+              onAction={hasActiveFilters ? handleResetFilters : undefined}
+              className="border-0 bg-muted shadow-none"
+            />
+          ) : (
+            <Table
+              aria-label={`${activeLabel} hourly forecast ledger`}
+              containerClassName="max-h-[420px] overflow-auto rounded-md border border-border"
+            >
+              <TableHeader className="sticky top-0 z-10 bg-muted">
+                <TableRow className="hover:bg-muted">
+                  <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
+                    Target time
+                  </TableHead>
+                  {showAllLedgerCols ? (
+                    <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
+                      Issued
+                    </TableHead>
+                  ) : null}
+                  <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                    Horizon
+                  </TableHead>
+                  <TableHead className="h-10 px-4 py-3 text-xs font-medium text-foreground">
+                    Model
+                  </TableHead>
+                  <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                    Forecast{activeUnit ? ` (${activeUnit})` : ""}
+                  </TableHead>
+                  {showAllLedgerCols ? (
+                    <>
+                      <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                        Interval
+                      </TableHead>
+                      <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                        24h baseline
+                      </TableHead>
+                    </>
+                  ) : null}
+                  <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                    Actual{activeUnit ? ` (${activeUnit})` : ""}
+                  </TableHead>
+                  <TableHead className="h-10 px-4 py-3 text-right text-xs font-medium text-foreground">
+                    Diff
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedLedgerRows.map((row) => {
+                  const hasBand =
+                    typeof row.lower_bound === "number" &&
+                    Number.isFinite(row.lower_bound) &&
+                    typeof row.upper_bound === "number" &&
+                    Number.isFinite(row.upper_bound)
 
-                return (
-                  <TableRow
-                    key={`${row.id}-${row.run_id}-${row.horizon_hour}-${row.model_family}`}
-                    className="h-[52px] md:h-11"
-                  >
-                    <TableCell className="px-4 py-3 text-sm tabular-nums">
-                      <TimestampPkt
-                        timestamp={row.target_timestamp_utc}
-                        timeZone={resolvedTimeZone}
-                        mode="datetime"
-                      />
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-sm text-foreground/80 tabular-nums">
-                      <TimestampPkt
-                        timestamp={row.issued_at_utc}
-                        timeZone={resolvedTimeZone}
-                        mode="datetime"
-                      />
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
-                      +{row.horizon_hour}h
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-sm">
-                      {formatModelLabel(row.model_family)}
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm font-medium tabular-nums">
-                      {formatMetricValue(row.predicted_value, 1)}
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm text-foreground/80 tabular-nums">
-                      {hasBand
-                        ? `${formatMetricValue(
-                            Math.min(row.lower_bound, row.upper_bound),
-                            1
-                          )} – ${formatMetricValue(
-                            Math.max(row.lower_bound, row.upper_bound),
-                            1
-                          )}`
-                        : "—"}
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
-                      {formatMetricValue(row.naive_baseline_value, 1)}
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
-                      {formatMetricValue(row.actual_value, 1)}
-                    </TableCell>
-                    <TableCell className="px-4 py-3 text-right text-sm font-medium tabular-nums">
-                      {formatSignedDelta(
-                        row.actual_value,
-                        row.predicted_value
-                      )}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        )}
+                  return (
+                    <TableRow
+                      key={`${row.id}-${row.run_id}-${row.horizon_hour}-${row.model_family}`}
+                      className="h-[52px] md:h-11"
+                    >
+                      <TableCell className="px-4 py-3 text-sm tabular-nums">
+                        <TimestampPkt
+                          timestamp={row.target_timestamp_utc}
+                          timeZone={resolvedTimeZone}
+                          mode="datetime"
+                        />
+                      </TableCell>
+                      {showAllLedgerCols ? (
+                        <TableCell className="px-4 py-3 text-sm text-foreground/80 tabular-nums">
+                          <TimestampPkt
+                            timestamp={row.issued_at_utc}
+                            timeZone={resolvedTimeZone}
+                            mode="datetime"
+                          />
+                        </TableCell>
+                      ) : null}
+                      <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
+                        +{row.horizon_hour}h
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-sm">
+                        {formatModelLabel(row.model_family)}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-right text-sm font-medium tabular-nums">
+                        {formatMetricValue(row.predicted_value, 1)}
+                      </TableCell>
+                      {showAllLedgerCols ? (
+                        <>
+                          <TableCell className="px-4 py-3 text-right text-sm text-foreground/80 tabular-nums">
+                            {hasBand
+                              ? `${formatMetricValue(
+                                  Math.min(row.lower_bound, row.upper_bound),
+                                  1
+                                )} – ${formatMetricValue(
+                                  Math.max(row.lower_bound, row.upper_bound),
+                                  1
+                                )}`
+                              : "—"}
+                          </TableCell>
+                          <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
+                            {formatMetricValue(row.naive_baseline_value, 1)}
+                          </TableCell>
+                        </>
+                      ) : null}
+                      <TableCell className="px-4 py-3 text-right text-sm tabular-nums">
+                        {formatMetricValue(row.actual_value, 1)}
+                      </TableCell>
+                      <TableCell className="px-4 py-3 text-right text-sm font-medium tabular-nums">
+                        {formatSignedDelta(
+                          row.actual_value,
+                          row.predicted_value
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )
+        ) : null}
       </section>
     </div>
   )

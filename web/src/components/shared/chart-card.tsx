@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { LineChart, Table2 } from "lucide-react"
+import { HelpCircle, LineChart, Table2 } from "lucide-react"
 import { cn } from "cn"
 
 import { Button } from "@/components/ui/button"
@@ -11,6 +11,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 export interface ChartTableColumn<T extends Record<string, unknown>> {
   key: keyof T & string
@@ -21,6 +26,7 @@ export interface ChartTableColumn<T extends Record<string, unknown>> {
 
 export interface ChartCardProps<T extends Record<string, unknown>> {
   title: string
+  titleInfo?: string
   subtitle?: string
   ariaLabel: string
   controls?: ReactNode
@@ -36,6 +42,7 @@ export interface ChartCardProps<T extends Record<string, unknown>> {
 
 export function ChartCard<T extends Record<string, unknown>>({
   title,
+  titleInfo,
   subtitle,
   ariaLabel,
   controls,
@@ -57,11 +64,29 @@ export function ChartCard<T extends Record<string, unknown>>({
         className
       )}
     >
-      <div className="flex min-h-8 flex-wrap items-center justify-between gap-3">
+      <div className="flex min-h-8 flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-base/6 font-semibold text-card-foreground">
-            {title}
-          </h3>
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-base/6 font-semibold text-card-foreground">
+              {title}
+            </h3>
+            {titleInfo ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={`About ${title}`}
+                    className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                  >
+                    <HelpCircle className="size-3.5" strokeWidth={1.75} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-left text-xs leading-relaxed">
+                  {titleInfo}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
           {subtitle ? (
             <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
           ) : null}
@@ -69,26 +94,28 @@ export function ChartCard<T extends Record<string, unknown>>({
 
         <div className="flex flex-wrap items-center gap-2">
           {controls}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 px-3 text-xs font-medium"
-            aria-pressed={showTable}
-            onClick={() => setShowTable((prev) => !prev)}
-          >
-            {showTable ? (
-              <>
-                <LineChart className="size-3.5" strokeWidth={1.75} />
-                <span>Show as chart</span>
-              </>
-            ) : (
-              <>
-                <Table2 className="size-3.5" strokeWidth={1.75} />
-                <span>Show as table</span>
-              </>
-            )}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant={showTable ? "secondary" : "outline"}
+                size="icon"
+                className="size-8 shrink-0"
+                aria-label={showTable ? "Show as chart" : "Show as data table"}
+                aria-pressed={showTable}
+                onClick={() => setShowTable((prev) => !prev)}
+              >
+                {showTable ? (
+                  <LineChart className="size-3.5" strokeWidth={1.75} />
+                ) : (
+                  <Table2 className="size-3.5" strokeWidth={1.75} />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {showTable ? "Switch to chart view" : "View underlying data table"}
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
 
