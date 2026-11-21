@@ -1,9 +1,8 @@
 name: SkyCast Daily & Drift-Triggered Training Pipeline
 
 on:
-  schedule:
-    # Runs daily at 01:15 UTC (06:15 PKT)
-    - cron: "15 1 * * *"
+  # Triggered daily at 01:02 UTC (06:02 PKT) via Supabase pg_cron + pg_net
+  # (see supabase/migrations/002_pg_cron_github_dispatch.sql), or by Drift Agent on drift_detected.
   workflow_dispatch:
     inputs:
       trigger_reason:

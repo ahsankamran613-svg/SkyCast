@@ -1,9 +1,8 @@
 name: SkyCast Hourly Ingestion & Agent Pipeline
 
 on:
-  schedule:
-    # Runs every hour at :05 UTC (01:05 UTC = 06:05 PKT triggers the daily Weather Report Agent)
-    - cron: "5 * * * *"
+  # Triggered every hour at :02 UTC (:02 PKT; 01:02 UTC = 06:02 PKT runs the daily Weather Report Agent)
+  # via Supabase pg_cron + pg_net (see supabase/migrations/002_pg_cron_github_dispatch.sql).
   workflow_dispatch:
     inputs:
       lookback_hours:

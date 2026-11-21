@@ -47,9 +47,10 @@ def test_hourly_pipeline_workflow_contract() -> None:
     wf = _load_workflow("hourly_pipeline.yml")
     triggers = _workflow_triggers(wf)
 
-    assert "schedule" in triggers and "workflow_dispatch" in triggers
-    crons = [item["cron"] for item in triggers["schedule"]]
-    assert "5 * * * *" in crons
+    assert "workflow_dispatch" in triggers
+    assert "schedule" not in triggers, (
+        "hourly_pipeline.yml schedule is managed by Supabase pg_cron to avoid double-triggering"
+    )
 
     perms = wf.get("permissions", {})
     assert perms.get("actions") == "write", (
@@ -83,9 +84,10 @@ def test_training_pipeline_workflow_matches_drift_dispatch_inputs() -> None:
     wf = _load_workflow("training_pipeline.yml")
     triggers = _workflow_triggers(wf)
 
-    assert "schedule" in triggers and "workflow_dispatch" in triggers
-    crons = [item["cron"] for item in triggers["schedule"]]
-    assert "15 1 * * *" in crons
+    assert "workflow_dispatch" in triggers
+    assert "schedule" not in triggers, (
+        "training_pipeline.yml schedule is managed by Supabase pg_cron to avoid double-triggering"
+    )
 
     dispatch_inputs = triggers["workflow_dispatch"]["inputs"]
     # Exact keys posted by skycast/agents/drift.py:_trigger_retraining()
@@ -109,6 +111,25 @@ def test_training_pipeline_workflow_matches_drift_dispatch_inputs() -> None:
         "SUPABASE_SERVICE_ROLE_KEY",
     ):
         assert required_env in env
+
+
+def test_supabase_pg_cron_dispatch_migration_contract() -> None:
+    """Verify Supabase pg_cron + pg_net migration schedules both workflows at exact minutes."""
+    sql_path = REPO_ROOT / "supabase" / "migrations" / "002_pg_cron_github_dispatch.sql"
+    assert sql_path.exists(), "002_pg_cron_github_dispatch.sql migration missing"
+    sql = sql_path.read_text(encoding="utf-8")
+
+    assert "CREATE EXTENSION IF NOT EXISTS pg_cron;" in sql
+    assert "CREATE EXTENSION IF NOT EXISTS pg_net;" in sql
+    assert "vault.decrypted_secrets" in sql
+    assert "github_actions_pat" in sql
+    assert "RAISE EXCEPTION" in sql
+    assert "net.http_post(" in sql
+    assert "'2 * * * *'" in sql
+    assert "hourly_pipeline.yml" in sql
+    assert "'2 1 * * *'" in sql
+    assert "training_pipeline.yml" in sql
+    assert '"trigger_reason": "scheduled"' in sql
 
 
 def test_ci_workflow_covers_pytest_web_and_docker() -> None:
